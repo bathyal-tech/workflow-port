@@ -1,0 +1,71 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release; must match package.json (for example 0.2.0)
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run verify
+      - name: Validate version
+        run: |
+          VERSION="${{ inputs.version }}"
+          CURRENT="$(bun -e 'console.log(require("./package.json").version)')"
+          if [ "$VERSION" != "$CURRENT" ]; then
+            echo "input $VERSION does not match package.json $CURRENT (bump it in a PR first)"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "tag v$VERSION already exists"
+            exit 1
+          fi
+          echo "PREV_TAG=$(git describe --tags --abbrev=0)" >> "$GITHUB_ENV"
+      - name: Draft release notes from conventional commits
+        run: |
+          VERSION="${{ inputs.version }}"
+          {
+            echo "## v$VERSION ($(date -u +%Y-%m-%d))"
+            echo ""
+            for type in feat fix docs build ci chore test refactor perf; do
+              LOG="$(git log "$PREV_TAG"..HEAD --format='%s' --grep="^$type" | sed "s/^$type: /* /")"
+              if [ -n "$LOG" ]; then
+                case "$type" in
+                  feat) echo "### Features";;
+                  fix) echo "### Fixes";;
+                  *) echo "### ${type^}";;
+                esac
+                echo "$LOG"
+                echo ""
+              fi
+            done
+          } > RELEASE_NOTES.md
+      - name: Tag and push
+        run: |
+          VERSION="${{ inputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "workflow-port v$VERSION"
+          git push origin "refs/tags/v$VERSION"
+      - run: bun run build:all
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/wfport-*
+      - run: gh release create "v$VERSION" --notes-file RELEASE_NOTES.md dist/wfport-*
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}

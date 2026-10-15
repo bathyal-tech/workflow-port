@@ -146,9 +146,9 @@ needs a person, and the assistant that built it worked the same way.
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). PRs run the full gate on Linux and
-macOS plus binary smoke tests; releases are automated with release-please
-(merge the release PR it opens — never push tags by hand). Security issues:
-[SECURITY.md](SECURITY.md). Participation follows the
+macOS plus binary smoke tests; releases go through the `release` workflow
+(run it from Actions with the next version — never push tags by hand).
+Security issues: [SECURITY.md](SECURITY.md). Participation follows the
 [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License
