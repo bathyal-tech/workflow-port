@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowJs": true,
+    "checkJs": true,
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "exactOptionalPropertyTypes": false,
+    "types": ["node"]
+  },
+  "include": ["bin/**/*.mjs", "src/**/*.mjs", "test/**/*.mjs", "bin/**/*.mts", "src/**/*.mts"]
+}

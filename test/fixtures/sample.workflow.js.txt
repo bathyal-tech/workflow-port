@@ -1,0 +1,32 @@
+export const meta = {
+  name: "sample-sweep",
+  description: "Smallest Claude Workflow shape the converter must handle",
+  whenToUse: "Fixture only.",
+  phases: [{ title: "Bootstrap", detail: "read inputs" }],
+};
+
+const RESULT_SCHEMA = {
+  type: "object",
+  required: ["status"],
+  properties: {
+    status: { type: "string", enum: ["ok", "abort"], description: "outcome" },
+  },
+};
+
+const input = args ?? {};
+phase("Bootstrap");
+log("starting");
+
+const first = await agent(`Do the thing with ${input.topic}.`, {
+  agentType: "bg-fix",
+  phase: "Bootstrap",
+  label: "first",
+  schema: RESULT_SCHEMA,
+});
+
+const pair = await parallel([
+  () => agent("Second A", { agentType: "readonly-reviewer", phase: "Bootstrap", label: "a", schema: RESULT_SCHEMA }),
+  () => agent("Second B", { label: "b" }),
+]);
+
+return { first, pair };

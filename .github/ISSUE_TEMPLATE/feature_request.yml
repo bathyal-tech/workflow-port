@@ -1,0 +1,22 @@
+name: Feature request
+description: Propose a mapping, emitter, or tooling improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What should change?
+    validations:
+      required: true
+  - type: textarea
+    id: example
+    attributes:
+      label: Example input and desired output or report entry
+    validations:
+      required: false
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: I can submit a PR for this
