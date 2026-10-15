@@ -15,7 +15,7 @@
     "format:check": "oxfmt --check",
     "verify": "bun run format:check && bun run lint && bun run typecheck && bun test",
     "build": "bun build bin/cli.mjs --compile --outfile dist/wfport",
-    "build:all": "bun build/bin/build-all.mjs",
+    "build:all": "bun bin/build-all.mjs",
     "prepare": "husky"
   },
   "devDependencies": {
