@@ -29,9 +29,12 @@
     "oxlint": "^1.88.0"
   },
   "lint-staged": {
-    "*.{mjs,js,json}": [
+    "*.{mjs,js}": [
       "oxfmt --check",
       "oxlint"
+    ],
+    "*.{json,md}": [
+      "oxfmt --check"
     ]
   },
   "engines": {
