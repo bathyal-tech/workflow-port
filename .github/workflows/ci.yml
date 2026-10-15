@@ -2,13 +2,55 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   verify:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run verify
+
+  smoke:
+    needs: verify
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - run: |
+          ./dist/wfport test/fixtures/sample.workflow.js.txt --to muse -o /tmp/smoke.muse.js --report /tmp/smoke.json
+          test $? -eq 2
+          ./dist/wfport test/fixtures/sample.workflow.js.txt --to grok -o /tmp/smoke.rhai --report /tmp/smoke-grok.json
+          test $? -eq 2
+          test -s /tmp/smoke.muse.js
+          test -s /tmp/smoke.rhai
+
+  cross-compile:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
-      - run: bun run verify
+      - run: bun run build:all
