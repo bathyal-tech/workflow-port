@@ -32,8 +32,13 @@ function rhaiString(text) {
 function rhaiPrompt(promptSrc) {
   const t = promptSrc.trim();
   if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
-    try { return rhaiString(JSON.parse(t.startsWith("'") ? `"${t.slice(1, -1).replace(/"/g, '\\"')}"` : t)); }
-    catch { return null; }
+    try {
+      return rhaiString(
+        JSON.parse(t.startsWith("'") ? `"${t.slice(1, -1).replace(/"/g, '\\"')}"` : t),
+      );
+    } catch {
+      return null;
+    }
   }
   if (t.startsWith("`") && t.endsWith("`") && !t.includes("${")) {
     return rhaiString(t.slice(1, -1));
@@ -43,7 +48,12 @@ function rhaiPrompt(promptSrc) {
 
 // Extract canonical facts (the host.agent request shape) from Claude source.
 export function extractFacts(source) {
-  const facts = { meta: null, calls: [], parallelSites: 0, hasReturn: /^\s*return\b/m.test(source) };
+  const facts = {
+    meta: null,
+    calls: [],
+    parallelSites: 0,
+    hasReturn: /^\s*return\b/m.test(source),
+  };
   const metaMatch = source.match(/export\s+const\s+meta\s*=\s*\{/);
   if (metaMatch) {
     const openIdx = source.indexOf("{", metaMatch.index);
@@ -75,7 +85,9 @@ export function extractFacts(source) {
       model: field(body, "model"),
       schema: fieldIdent(body, "schema"),
       // A call inside parallel([...]) thunks is lowered as a job map instead.
-      inParallel: /parallel\s*\([^)]*$/.test(source.slice(Math.max(0, am.index - 200), am.index)) || undefined,
+      inParallel:
+        /parallel\s*\([^)]*$/.test(source.slice(Math.max(0, am.index - 200), am.index)) ||
+        undefined,
     });
   }
   facts.parallelSites = (source.match(/(?<![\w$.])parallel\s*\(/g) || []).length;
@@ -105,7 +117,11 @@ export function emitGrok(source, { inputName = "<input>" } = {}) {
     out.push("};");
     out.push("");
   } else {
-    gaps.push({ kind: "meta", line: 1, detail: "no meta block — Grok requires meta as the first statement" });
+    gaps.push({
+      kind: "meta",
+      line: 1,
+      detail: "no meta block — Grok requires meta as the first statement",
+    });
   }
 
   let seq = 0;
@@ -113,14 +129,27 @@ export function emitGrok(source, { inputName = "<input>" } = {}) {
     seq += 1;
     const prompt = rhaiPrompt(call.promptSrc);
     if (prompt === null) {
-      gaps.push({ kind: "prompt", line: call.line, detail: "prompt uses JS interpolation/expression — re-express with Rhai concatenation and json_encode for untrusted data" });
+      gaps.push({
+        kind: "prompt",
+        line: call.line,
+        detail:
+          "prompt uses JS interpolation/expression — re-express with Rhai concatenation and json_encode for untrusted data",
+      });
     }
     const capability = call.agentType && READONLY_HINT.test(call.agentType) ? "read-only" : "all";
     if (call.agentType) {
-      gaps.push({ kind: "capability_mode", line: call.line, detail: `${call.agentType} -> capability_mode "${capability}" (placeholder — confirm against the agent file's tools)` });
+      gaps.push({
+        kind: "capability_mode",
+        line: call.line,
+        detail: `${call.agentType} -> capability_mode "${capability}" (placeholder — confirm against the agent file's tools)`,
+      });
     }
     if (call.schema) {
-      gaps.push({ kind: "output_schema", line: call.line, detail: `${call.schema}: re-quote keys as a Grok map #{ "type": ... } — Grok validates output_schema host-side` });
+      gaps.push({
+        kind: "output_schema",
+        line: call.line,
+        detail: `${call.schema}: re-quote keys as a Grok map #{ "type": ... } — Grok validates output_schema host-side`,
+      });
     }
     const opts = [];
     if (call.label) opts.push(`label: ${rhaiString(call.label)}`);
@@ -129,7 +158,9 @@ export function emitGrok(source, { inputName = "<input>" } = {}) {
     if (call.model) opts.push(`model: ${rhaiString(call.model)}`);
     if (call.schema) opts.push(`output_schema: ${call.schema}`);
     const promptExpr = prompt ?? rhaiString(`TODO: translate prompt (source line ${call.line})`);
-    out.push(`// source line ${call.line}${call.agentType ? `, agentType "${call.agentType}"` : ""}`);
+    out.push(
+      `// source line ${call.line}${call.agentType ? `, agentType "${call.agentType}"` : ""}`,
+    );
     out.push(`let r${seq} = agent(`);
     out.push(`    ${promptExpr},`);
     out.push(`    #{ ${opts.join(", ")} },`);
@@ -138,18 +169,32 @@ export function emitGrok(source, { inputName = "<input>" } = {}) {
   }
 
   if (facts.parallelSites > 0) {
-    gaps.push({ kind: "parallel", line: 1, detail: `${facts.parallelSites} parallel() site(s) — Grok parallel takes a prebuilt job list [#{ prompt, label, ... }]; rebuild the job construction, do not port JS thunks` });
+    gaps.push({
+      kind: "parallel",
+      line: 1,
+      detail: `${facts.parallelSites} parallel() site(s) — Grok parallel takes a prebuilt job list [#{ prompt, label, ... }]; rebuild the job construction, do not port JS thunks`,
+    });
     out.push("// TODO: rebuild each parallel() fan-out as a job list, then:");
     out.push("// let panel = parallel(jobs);");
     out.push("");
   }
 
-  gaps.push({ kind: "control-flow", line: 1, detail: "JS loops/conditionals/helpers were not translated — Rhai control flow must be rewritten by hand" });
+  gaps.push({
+    kind: "control-flow",
+    line: 1,
+    detail:
+      "JS loops/conditionals/helpers were not translated — Rhai control flow must be rewritten by hand",
+  });
   if (!facts.hasReturn) {
-    gaps.push({ kind: "complete", line: 1, detail: "no top-level return — end the Rhai script with complete(#{ ... }) carrying the result value" });
+    gaps.push({
+      kind: "complete",
+      line: 1,
+      detail:
+        "no top-level return — end the Rhai script with complete(#{ ... }) carrying the result value",
+    });
   }
   out.push("// TODO: map the workflow result value (Muse return / Claude return) here.");
-  out.push("complete(#{ status: \"converted\" });");
+  out.push('complete(#{ status: "converted" });');
   out.push("");
 
   return { code: out.join("\n"), facts, gaps };

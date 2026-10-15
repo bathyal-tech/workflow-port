@@ -27,7 +27,14 @@ let report;
 if (target === "grok") {
   const grok = emitGrok(source, { inputName: input });
   code = grok.code;
-  report = { input, target: "grok", agentCallSites: grok.facts.calls.length, parallelCallSites: grok.facts.parallelSites, metaName: grok.facts.meta?.name ?? null, gaps: grok.gaps };
+  report = {
+    input,
+    target: "grok",
+    agentCallSites: grok.facts.calls.length,
+    parallelCallSites: grok.facts.parallelSites,
+    metaName: grok.facts.meta?.name ?? null,
+    gaps: grok.gaps,
+  };
 } else {
   const agentsDir = opt("--agents-dir") ?? join(dirname(input), "..", "agents");
   ({ code, report } = convert(source, { inputName: input, agentsDir }));

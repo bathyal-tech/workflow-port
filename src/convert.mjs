@@ -20,16 +20,73 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
+/**
+ * A single item needing human review in the conversion report.
+ * @typedef {object} Gap
+ * @property {string} kind
+ * @property {number} line
+ * @property {string} detail
+ *
+ * @typedef {object} SchemaInfo
+ * @property {string} name
+ * @property {number} line
+ * @property {string[]} issues
+ *
+ * @typedef {object} AgentCallSite
+ * @property {number} start
+ * @property {number} openIdx
+ * @property {number} closeIdx
+ * @property {number} line
+ *
+ * @typedef {object} AgentTypeReport
+ * @property {string} value
+ * @property {string} muse
+ * @property {string | null} agentFile
+ * @property {boolean | null} agentFileExists
+ * @property {string} action
+ *
+ * @typedef {object} ConvertReport
+ * @property {string} input
+ * @property {string | null} metaName
+ * @property {number} agentCallSites
+ * @property {number} parallelCallSites
+ * @property {AgentTypeReport[]} agentTypes
+ * @property {SchemaInfo[]} schemas
+ * @property {string[]} banned
+ * @property {Gap[]} gaps
+ */
+
 export const MUSE_AGENT_TYPES = new Set(["general-purpose", "workflow-subagent"]);
 export const SCHEMA_KEYWORDS_OK = new Set(["type", "enum", "required", "properties", "items"]);
 const SCHEMA_KEYWORDS_BAD = [
-  "description", "additionalProperties", "$ref", "anyOf", "oneOf", "allOf",
-  "not", "default", "format", "pattern", "minLength", "maxLength",
-  "minimum", "maximum", "examples", "title", "$schema",
+  "description",
+  "additionalProperties",
+  "$ref",
+  "anyOf",
+  "oneOf",
+  "allOf",
+  "not",
+  "default",
+  "format",
+  "pattern",
+  "minLength",
+  "maxLength",
+  "minimum",
+  "maximum",
+  "examples",
+  "title",
+  "$schema",
 ];
 
 // Find the index of the close char matching source[openIdx], skipping
 // strings, template literals (with ${} nesting), and comments.
+/**
+ * @param {string} source
+ * @param {number} openIdx
+ * @param {string} open
+ * @param {string} close
+ * @returns {number} index of the match, or -1
+ */
 export function matchDelim(source, openIdx, open, close) {
   let depth = 0;
   let i = openIdx;
@@ -38,28 +95,80 @@ export function matchDelim(source, openIdx, open, close) {
   while (i < source.length) {
     const c = source[i];
     const n = source[i + 1] ?? "";
-    if (state === "line") { if (c === "\n") state = "code"; i += 1; continue; }
-    if (state === "block") { if (c === "*" && n === "/") { state = "code"; i += 2; } else i += 1; continue; }
+    if (state === "line") {
+      if (c === "\n") state = "code";
+      i += 1;
+      continue;
+    }
+    if (state === "block") {
+      if (c === "*" && n === "/") {
+        state = "code";
+        i += 2;
+      } else i += 1;
+      continue;
+    }
     if (state === "sq" || state === "dq") {
       const q = state === "sq" ? "'" : '"';
-      if (c === "\\") { i += 2; continue; }
+      if (c === "\\") {
+        i += 2;
+        continue;
+      }
       if (c === q) state = "code";
-      i += 1; continue;
+      i += 1;
+      continue;
     }
     if (state === "tmpl") {
-      if (c === "\\") { i += 2; continue; }
-      if (c === "`") { state = "code"; i += 1; continue; }
-      if (c === "$" && n === "{") { tmplStack.push(depth); state = "code"; depth += 1; i += 2; continue; }
-      i += 1; continue;
+      if (c === "\\") {
+        i += 2;
+        continue;
+      }
+      if (c === "`") {
+        state = "code";
+        i += 1;
+        continue;
+      }
+      if (c === "$" && n === "{") {
+        tmplStack.push(depth);
+        state = "code";
+        depth += 1;
+        i += 2;
+        continue;
+      }
+      i += 1;
+      continue;
     }
     // code
-    if (c === "/" && n === "/") { state = "line"; i += 2; continue; }
-    if (c === "/" && n === "*") { state = "block"; i += 2; continue; }
-    if (c === "'") { state = "sq"; i += 1; continue; }
-    if (c === '"') { state = "dq"; i += 1; continue; }
-    if (c === "`") { state = "tmpl"; i += 1; continue; }
+    if (c === "/" && n === "/") {
+      state = "line";
+      i += 2;
+      continue;
+    }
+    if (c === "/" && n === "*") {
+      state = "block";
+      i += 2;
+      continue;
+    }
+    if (c === "'") {
+      state = "sq";
+      i += 1;
+      continue;
+    }
+    if (c === '"') {
+      state = "dq";
+      i += 1;
+      continue;
+    }
+    if (c === "`") {
+      state = "tmpl";
+      i += 1;
+      continue;
+    }
     if (c === "}" && tmplStack.length && depth === tmplStack[tmplStack.length - 1] + 1) {
-      depth -= 1; tmplStack.pop(); state = "tmpl"; i += 1; continue;
+      depth -= 1;
+      tmplStack.pop();
+      state = "tmpl";
+      i += 1;
+      continue;
     }
     if (c === open) depth += 1;
     if (c === close) {
@@ -72,6 +181,10 @@ export function matchDelim(source, openIdx, open, close) {
 }
 
 // Split a call's argument text on top-level commas.
+/**
+ * @param {string} text
+ * @returns {string[]}
+ */
 export function splitTopLevel(text) {
   const parts = [];
   let depth = 0;
@@ -83,43 +196,87 @@ export function splitTopLevel(text) {
     const n = text[i + 1] ?? "";
     if (state === "sq" || state === "dq") {
       const q = state === "sq" ? "'" : '"';
-      if (c === "\\") { i += 1; continue; }
+      if (c === "\\") {
+        i += 1;
+        continue;
+      }
       if (c === q) state = "code";
       continue;
     }
     if (state === "tmpl") {
-      if (c === "\\") { i += 1; continue; }
-      if (c === "`") { state = "code"; continue; }
-      if (c === "$" && n === "{") { tmplStack.push(depth); state = "code"; depth += 1; i += 1; }
+      if (c === "\\") {
+        i += 1;
+        continue;
+      }
+      if (c === "`") {
+        state = "code";
+        continue;
+      }
+      if (c === "$" && n === "{") {
+        tmplStack.push(depth);
+        state = "code";
+        depth += 1;
+        i += 1;
+      }
       continue;
     }
-    if (c === "'") { state = "sq"; continue; }
-    if (c === '"') { state = "dq"; continue; }
-    if (c === "`") { state = "tmpl"; continue; }
+    if (c === "'") {
+      state = "sq";
+      continue;
+    }
+    if (c === '"') {
+      state = "dq";
+      continue;
+    }
+    if (c === "`") {
+      state = "tmpl";
+      continue;
+    }
     if (c === "(" || c === "[" || c === "{") depth += 1;
     if (c === ")" || c === "]" || c === "}") {
       depth -= 1;
-      if (tmplStack.length && depth === tmplStack[tmplStack.length - 1]) { tmplStack.pop(); state = "tmpl"; }
+      if (tmplStack.length && depth === tmplStack[tmplStack.length - 1]) {
+        tmplStack.pop();
+        state = "tmpl";
+      }
       continue;
     }
-    if (c === "," && depth === 0) { parts.push(text.slice(start, i)); start = i + 1; }
+    if (c === "," && depth === 0) {
+      parts.push(text.slice(start, i));
+      start = i + 1;
+    }
   }
   parts.push(text.slice(start));
   return parts.map((p) => p.trim()).filter((p) => p.length > 0);
 }
 
+/**
+ * @param {string} source
+ * @param {number} idx
+ * @returns {number}
+ */
 export function lineOf(source, idx) {
   return source.slice(0, idx).split("\n").length;
 }
 
 // Rewrite one agent(prompt[, opts]) call. Returns { code, gaps }.
+/**
+ * @param {string} inner
+ * @param {Gap[]} gaps
+ * @param {number} line
+ * @returns {{ code: string }}
+ */
 function convertAgentCall(inner, gaps, line) {
   const args = splitTopLevel(inner);
   const prompt = args[0] ?? "";
   const opts = args[1];
   if (!opts) return { code: `host.agent({ input: ${prompt} })` };
   if (!opts.startsWith("{")) {
-    gaps.push({ kind: "dynamic-options", line, detail: `options from ${opts.slice(0, 60)} — spread as-is; verify agentType/schema by hand` });
+    gaps.push({
+      kind: "dynamic-options",
+      line,
+      detail: `options from ${opts.slice(0, 60)} — spread as-is; verify agentType/schema by hand`,
+    });
     return { code: `host.agent({ input: ${prompt}, ...${opts} })` };
   }
   const closeIdx = matchDelim(opts, 0, "{", "}");
@@ -128,12 +285,21 @@ function convertAgentCall(inner, gaps, line) {
   let outBody = body;
   if (typeMatch && !MUSE_AGENT_TYPES.has(typeMatch[2])) {
     gaps.push({ kind: "agentType", line, detail: typeMatch[2] });
-    outBody = body.replace(/agentType\s*:\s*(['"])([^'"]+)\1/, `agentType: "general-purpose" /* was: "${typeMatch[2]}" — inline .claude/agents/${typeMatch[2]}.md */`);
+    outBody = body.replace(
+      /agentType\s*:\s*(['"])([^'"]+)\1/,
+      `agentType: "general-purpose" /* was: "${typeMatch[2]}" — inline .claude/agents/${typeMatch[2]}.md */`,
+    );
   }
   return { code: `host.agent({ input: ${prompt}${outBody ? `, ${outBody}` : ""} })` };
 }
 
+/**
+ * @param {string} source
+ * @param {Gap[]} gaps
+ * @returns {SchemaInfo[]}
+ */
 function analyzeSchemas(source, gaps) {
+  /** @type {SchemaInfo[]} */
   const schemas = [];
   const re = /const\s+([A-Za-z_$][\w$]*(?:SCHEMA|Schema)[\w$]*)\s*=\s*\{/g;
   let m;
@@ -149,7 +315,8 @@ function analyzeSchemas(source, gaps) {
     }
     if (Buffer.byteLength(literal, "utf8") > 4096) issues.push("exceeds 4 KiB inline limit");
     schemas.push({ name: m[1], line: lineOf(source, m.index), issues });
-    for (const issue of issues) gaps.push({ kind: "schema", line: lineOf(source, m.index), detail: `${m[1]}: ${issue}` });
+    for (const issue of issues)
+      gaps.push({ kind: "schema", line: lineOf(source, m.index), detail: `${m[1]}: ${issue}` });
   }
   return schemas;
 }
@@ -166,7 +333,10 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   if (metaMatch) {
     const nameHit = code.slice(metaMatch.index).match(/name\s*:\s*(['"])([^'"]+)\1/);
     metaName = nameHit ? nameHit[2] : null;
-    code = code.replace(/export\s+const\s+meta\b/, "const meta /* Muse: name/description move to the Workflow launch */");
+    code = code.replace(
+      /export\s+const\s+meta\b/,
+      "const meta /* Muse: name/description move to the Workflow launch */",
+    );
   } else {
     gaps.push({ kind: "meta", line: 1, detail: "no export const meta found" });
   }
@@ -195,24 +365,49 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   code = code.replace(/(?<![\w$.])pipeline\s*\(/g, "host.pipeline(");
 
   const schemas = analyzeSchemas(source, gaps);
-  const agentTypes = [...new Set(gaps.filter((g) => g.kind === "agentType").map((g) => g.detail))].sort();
+  const agentTypes = [
+    ...new Set(gaps.filter((g) => g.kind === "agentType").map((g) => g.detail)),
+  ].sort();
   const agentTypeReport = agentTypes.map((value) => ({
     value,
     muse: "general-purpose",
     agentFile: agentsDir ? join(agentsDir, `${value}.md`) : null,
     agentFileExists: agentsDir ? existsSync(join(agentsDir, `${value}.md`)) : null,
-    action: "inline the agent file's prompt into the call (or a shared prefix) — Muse has no per-file agent definitions",
+    action:
+      "inline the agent file's prompt into the call (or a shared prefix) — Muse has no per-file agent definitions",
   }));
 
   const banned = [];
   for (const pat of ["Date.now", "Math.random", "new Date("]) {
-    if (source.includes(pat)) { banned.push(pat); gaps.push({ kind: "banned-api", line: 1, detail: `${pat} throws under deterministic replay in both dialects` }); }
+    if (source.includes(pat)) {
+      banned.push(pat);
+      gaps.push({
+        kind: "banned-api",
+        line: 1,
+        detail: `${pat} throws under deterministic replay in both dialects`,
+      });
+    }
   }
-  if (/^\s*import\s|require\s*\(/m.test(source)) gaps.push({ kind: "import", line: 1, detail: "imports/requires are not allowed in Workflow scripts" });
+  if (/^\s*import\s|require\s*\(/m.test(source))
+    gaps.push({
+      kind: "import",
+      line: 1,
+      detail: "imports/requires are not allowed in Workflow scripts",
+    });
 
   const parallelSites = (source.match(/(?<![\w$.])parallel\s*\(/g) || []).length;
-  if (calls.length > 15) gaps.push({ kind: "fanout", line: 1, detail: `${calls.length} agent() call sites — a multi-round sweep exceeds the ~15-child guideline; chunk rounds across runs` });
-  if (!/^\s*return\b/m.test(source)) gaps.push({ kind: "return", line: 1, detail: "no top-level return — Muse expects the run to end with return { status, ref, text }" });
+  if (calls.length > 15)
+    gaps.push({
+      kind: "fanout",
+      line: 1,
+      detail: `${calls.length} agent() call sites — a multi-round sweep exceeds the ~15-child guideline; chunk rounds across runs`,
+    });
+  if (!/^\s*return\b/m.test(source))
+    gaps.push({
+      kind: "return",
+      line: 1,
+      detail: "no top-level return — Muse expects the run to end with return { status, ref, text }",
+    });
 
   const header = [
     `// Converted from Claude Workflow${metaName ? ` "${metaName}"` : ""} by workflow-port.`,
@@ -233,4 +428,3 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   };
   return { code: wrapped, report };
 }
-

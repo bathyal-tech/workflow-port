@@ -3,14 +3,38 @@
   "version": "0.1.0",
   "description": "Convert Claude Workflow scripts to Muse Workflow scripts (codemod + gap report)",
   "license": "MIT",
-  "type": "module",
   "bin": {
     "wfport": "bin/cli.mjs"
   },
+  "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "bun test",
+    "typecheck": "tsgo --noEmit",
+    "lint": "oxlint",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "verify": "bun run format:check && bun run lint && bun run typecheck && bun test",
+    "build": "bun build bin/cli.mjs --compile --outfile dist/wfport",
+    "build:all": "bun build/bin/build-all.mjs",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.3",
+    "@commitlint/config-conventional": "^21.2.3",
+    "@types/node": "^26.6.5",
+    "@typescript/native-preview": "^7.0.0-dev.20260707.2",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.6.0",
+    "oxfmt": "^0.73.0",
+    "oxlint": "^1.88.0"
+  },
+  "lint-staged": {
+    "*.{mjs,js,json}": [
+      "oxfmt --check",
+      "oxlint"
+    ]
   },
   "engines": {
-    "node": ">=20"
+    "bun": ">=1.2"
   }
 }
