@@ -215,7 +215,7 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   if (!/^\s*return\b/m.test(source)) gaps.push({ kind: "return", line: 1, detail: "no top-level return — Muse expects the run to end with return { status, ref, text }" });
 
   const header = [
-    `// Converted from Claude Workflow${metaName ? ` "${metaName}"` : ""} by claude-muse-workflow-converter.`,
+    `// Converted from Claude Workflow${metaName ? ` "${metaName}"` : ""} by workflow-port.`,
     "// Review every TODO/gap in the conversion report before running.",
     "",
   ].join("\n");

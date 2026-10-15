@@ -1,11 +1,11 @@
 {
-  "name": "claude-muse-workflow-converter",
+  "name": "workflow-port",
   "version": "0.1.0",
   "description": "Convert Claude Workflow scripts to Muse Workflow scripts (codemod + gap report)",
   "license": "MIT",
   "type": "module",
   "bin": {
-    "convert-workflow": "bin/cli.mjs"
+    "wfport": "bin/cli.mjs"
   },
   "scripts": {
     "test": "node --test"

@@ -1,4 +1,4 @@
-# claude-muse-workflow-converter
+# workflow-port
 
 Convert [Claude Workflow](https://docs.claude.com) scripts (`.claude/workflows/*.js`)
 to [Muse](https://muse.ai) Workflow scripts or Grok Build (`.grok/workflows/*.rhai`,

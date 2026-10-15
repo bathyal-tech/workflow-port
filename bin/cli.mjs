@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Usage:
-//   convert-workflow <input.js> [-o output.js] [--report report.json]
+//   wfport <input.js> [-o output.js] [--report report.json]
 //                     [--agents-dir path/to/.claude/agents]
 // Without -o the converted source goes to stdout; the gap report
 // (JSON) always goes to stderr unless --report writes it to a file.
@@ -13,7 +13,7 @@ import { emitGrok } from "../src/grok.mjs";
 const argv = process.argv.slice(2);
 const input = argv.find((a) => !a.startsWith("-"));
 if (!input) {
-  console.error("usage: convert-workflow <input.js> [-o output.js] [--report f] [--agents-dir dir]");
+  console.error("usage: wfport <input.js> [-o output.js] [--report f] [--agents-dir dir]");
   process.exit(1);
 }
 const opt = (flag) => {
