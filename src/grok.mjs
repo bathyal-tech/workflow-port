@@ -13,22 +13,74 @@
 
 import { matchDelim, splitTopLevel, lineOf } from "./convert.mjs";
 
+/**
+ * @typedef {import("./convert.mjs").Gap} Gap
+ *
+ * @typedef {object} GrokMeta
+ * @property {string | null} name
+ * @property {string | null} description
+ * @property {string | null} whenToUse
+ * @property {string[]} phases
+ *
+ * @typedef {object} AgentCallFact
+ * @property {number} line
+ * @property {string} promptSrc
+ * @property {string | null} agentType
+ * @property {string | null} label
+ * @property {string | null} phase
+ * @property {string | null} model
+ * @property {string | null} schema
+ * @property {boolean | undefined} inParallel
+ *
+ * @typedef {object} WorkflowFacts
+ * @property {GrokMeta | null} meta
+ * @property {AgentCallFact[]} calls
+ * @property {number} parallelSites
+ * @property {boolean} hasReturn
+ *
+ * @typedef {object} GrokReport
+ * @property {string} input
+ * @property {string} target
+ * @property {number} agentCallSites
+ * @property {number} parallelCallSites
+ * @property {string | null} metaName
+ * @property {Gap[]} gaps
+ */
+
 const READONLY_HINT = /review|readonly|scout|triage|analyst|discover/;
 
+/**
+ * @param {string} body
+ * @param {string} name
+ * @returns {string | null}
+ */
 function field(body, name) {
   const m = body.match(new RegExp(`${name}\\s*:\\s*(['"\`])([^'"\`]*)\\1`));
   return m ? m[2] : null;
 }
+/**
+ * @param {string} body
+ * @param {string} name
+ * @returns {string | null}
+ */
 function fieldIdent(body, name) {
   const m = body.match(new RegExp(`${name}\\s*:\\s*([A-Za-z_$][\\w$]*)`));
   return m ? m[1] : null;
 }
+/**
+ * @param {string} text
+ * @returns {string}
+ */
 function rhaiString(text) {
   return `"${text.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
 }
 
 // Translate a JS prompt expression to a Rhai string, or null if it needs
 // hand translation (interpolation / arbitrary expression).
+/**
+ * @param {string} promptSrc
+ * @returns {string | null}
+ */
 function rhaiPrompt(promptSrc) {
   const t = promptSrc.trim();
   if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
@@ -47,7 +99,12 @@ function rhaiPrompt(promptSrc) {
 }
 
 // Extract canonical facts (the host.agent request shape) from Claude source.
+/**
+ * @param {string} source
+ * @returns {WorkflowFacts}
+ */
 export function extractFacts(source) {
+  /** @type {WorkflowFacts} */
   const facts = {
     meta: null,
     calls: [],
@@ -94,9 +151,16 @@ export function extractFacts(source) {
   return facts;
 }
 
+/**
+ * @param {string} source
+ * @param {{ inputName?: string }} [options]
+ * @returns {{ code: string, facts: WorkflowFacts, gaps: Gap[] }}
+ */
 export function emitGrok(source, { inputName = "<input>" } = {}) {
   const facts = extractFacts(source);
+  /** @type {Gap[]} */
   const gaps = [];
+  /** @type {string[]} */
   const out = [];
   out.push(`// Grok Build workflow derived from Claude Workflow ${inputName} via the`);
   out.push("// canonical host.agent form. Skeleton: translate flagged prompts and");
@@ -151,6 +215,7 @@ export function emitGrok(source, { inputName = "<input>" } = {}) {
         detail: `${call.schema}: re-quote keys as a Grok map #{ "type": ... } — Grok validates output_schema host-side`,
       });
     }
+    /** @type {string[]} */
     const opts = [];
     if (call.label) opts.push(`label: ${rhaiString(call.label)}`);
     opts.push(`capability_mode: ${rhaiString(capability)}`);

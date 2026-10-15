@@ -30,6 +30,7 @@ test("custom agentType is rewritten and reported", () => {
 test("schema with description is flagged", () => {
   const { report } = convert(sample, { inputName: "sample.workflow.js" });
   const schema = report.schemas.find((s) => s.name === "RESULT_SCHEMA");
+  assert.ok(schema);
   assert.ok(schema.issues.some((i) => i.includes('"description"')));
   assert.ok(report.gaps.some((g) => g.kind === "schema"));
 });

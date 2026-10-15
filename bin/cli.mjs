@@ -16,6 +16,10 @@ if (!input) {
   console.error("usage: wfport <input.js> [-o output.js] [--report f] [--agents-dir dir]");
   process.exit(1);
 }
+/**
+ * @param {string} flag
+ * @returns {string | null}
+ */
 const opt = (flag) => {
   const i = argv.indexOf(flag);
   return i >= 0 ? argv[i + 1] : null;

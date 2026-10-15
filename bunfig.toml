@@ -1,5 +1,2 @@
 [install]
 auto = "fallback"
-
-[test]
-preload = []

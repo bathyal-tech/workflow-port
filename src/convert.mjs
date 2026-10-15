@@ -322,7 +322,13 @@ function analyzeSchemas(source, gaps) {
 }
 
 // Convert Claude Workflow source to Muse Workflow source + gap report.
+/**
+ * @param {string} source
+ * @param {{ inputName?: string, agentsDir?: string | null }} [options]
+ * @returns {{ code: string, report: ConvertReport }}
+ */
 export function convert(source, { inputName = "<input>", agentsDir = null } = {}) {
+  /** @type {Gap[]} */
   const gaps = [];
   let code = source;
 
@@ -342,6 +348,7 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   }
 
   // agent(...) calls, rewritten right-to-left so offsets stay valid.
+  /** @type {AgentCallSite[]} */
   const calls = [];
   const agentRe = /(?<![\w$.])agent\s*\(/g;
   let am;
