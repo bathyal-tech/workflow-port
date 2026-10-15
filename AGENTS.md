@@ -25,3 +25,5 @@
 - Name test files with the `*.test.mjs` pattern.
 - JSDoc-annotate all functions; `tsgo --noEmit` must pass with zero errors.
 - Conventional commits (enforced by commitlint); pre-commit runs lint-staged.
+- Releases via release-please (release PRs from conventional commits);
+  `main` is protected — work lands through PRs with the CI gate green.

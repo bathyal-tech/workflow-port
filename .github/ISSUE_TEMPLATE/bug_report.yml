@@ -1,0 +1,33 @@
+name: Bug report
+description: Something converts wrong or crashes
+labels: [bug]
+body:
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal workflow that reproduces it
+      description: Paste the smallest Claude Workflow source that shows the problem
+      render: javascript
+    validations:
+      required: true
+  - type: dropdown
+    id: target
+    attributes:
+      label: Target emitter
+      options:
+        - muse
+        - grok
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened vs. what you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: wfport version (release tag or commit)
+    validations:
+      required: true
