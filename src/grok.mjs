@@ -11,7 +11,7 @@
 // emitter produces a faithful skeleton: meta + every agent call lowered to
 // agent()/parallel() with mapped options, and gaps for everything else.
 
-import { matchDelim, splitTopLevel, lineOf } from "./convert.mjs";
+import { matchDelim, splitTopLevel, lineOf, MUSE_AGENT_TYPES } from "./convert.mjs";
 
 /**
  * @typedef {import("./convert.mjs").Gap} Gap
@@ -30,6 +30,9 @@ import { matchDelim, splitTopLevel, lineOf } from "./convert.mjs";
  * @property {string | null} phase
  * @property {string | null} model
  * @property {string | null} schema
+ * @property {boolean} [schemaInline]
+ * @property {string | null} [capability]
+ * @property {boolean} [dynamicOpts]
  * @property {boolean | undefined} inParallel
  *
  * @typedef {object} WorkflowFacts
@@ -54,7 +57,7 @@ const READONLY_HINT = /review|readonly|scout|triage|analyst|discover/;
  * @param {string} name
  * @returns {string | null}
  */
-function field(body, name) {
+export function field(body, name) {
   const m = body.match(new RegExp(`${name}\\s*:\\s*(['"\`])([^'"\`]*)\\1`));
   return m ? m[2] : null;
 }
@@ -63,7 +66,7 @@ function field(body, name) {
  * @param {string} name
  * @returns {string | null}
  */
-function fieldIdent(body, name) {
+export function fieldIdent(body, name) {
   const m = body.match(new RegExp(`${name}\\s*:\\s*([A-Za-z_$][\\w$]*)`));
   return m ? m[1] : null;
 }
@@ -152,17 +155,20 @@ export function extractFacts(source) {
 }
 
 /**
- * @param {string} source
- * @param {{ inputName?: string }} [options]
- * @returns {{ code: string, facts: WorkflowFacts, gaps: Gap[] }}
+ * Lower canonical call-site facts to a Grok Build (Rhai) skeleton.
+ * @param {WorkflowFacts} facts
+ * @param {{ inputName?: string, sourceName?: string }} [options]
+ * @returns {{ code: string, gaps: Gap[] }}
  */
-export function emitGrok(source, { inputName = "<input>" } = {}) {
-  const facts = extractFacts(source);
+export function emitGrokFromFacts(
+  facts,
+  { inputName = "<input>", sourceName = "Claude Workflow" } = {},
+) {
   /** @type {Gap[]} */
   const gaps = [];
   /** @type {string[]} */
   const out = [];
-  out.push(`// Grok Build workflow derived from Claude Workflow ${inputName} via the`);
+  out.push(`// Grok Build workflow derived from ${sourceName} ${inputName} via the`);
   out.push("// canonical host.agent form. Skeleton: translate flagged prompts and");
   out.push("// control flow by hand before running.");
   out.push("");
@@ -201,7 +207,7 @@ export function emitGrok(source, { inputName = "<input>" } = {}) {
       });
     }
     const capability = call.agentType && READONLY_HINT.test(call.agentType) ? "read-only" : "all";
-    if (call.agentType) {
+    if (call.agentType && !MUSE_AGENT_TYPES.has(call.agentType)) {
       gaps.push({
         kind: "capability_mode",
         line: call.line,
@@ -214,6 +220,19 @@ export function emitGrok(source, { inputName = "<input>" } = {}) {
         line: call.line,
         detail: `${call.schema}: re-quote keys as a Grok map #{ "type": ... } — Grok validates output_schema host-side`,
       });
+    } else if (call.schemaInline) {
+      gaps.push({
+        kind: "output_schema",
+        line: call.line,
+        detail: `inline schema object — re-quote as a Grok map #{ "type": ... } by hand`,
+      });
+    }
+    if (call.dynamicOpts) {
+      gaps.push({
+        kind: "dynamic-options",
+        line: call.line,
+        detail: `options built dynamically — map agentType/schema onto the Grok option map by hand`,
+      });
     }
     /** @type {string[]} */
     const opts = [];
@@ -222,6 +241,10 @@ export function emitGrok(source, { inputName = "<input>" } = {}) {
     if (call.phase) opts.push(`phase: ${rhaiString(call.phase)}`);
     if (call.model) opts.push(`model: ${rhaiString(call.model)}`);
     if (call.schema) opts.push(`output_schema: ${call.schema}`);
+    else if (call.schemaInline)
+      opts.push(
+        `/* TODO: re-quote inline schema (source line ${call.line}) */ output_schema: #{ "type": "object" }`,
+      );
     const promptExpr = prompt ?? rhaiString(`TODO: translate prompt (source line ${call.line})`);
     out.push(
       `// source line ${call.line}${call.agentType ? `, agentType "${call.agentType}"` : ""}`,
@@ -262,5 +285,110 @@ export function emitGrok(source, { inputName = "<input>" } = {}) {
   out.push('complete(#{ status: "converted" });');
   out.push("");
 
-  return { code: out.join("\n"), facts, gaps };
+  return { code: out.join("\n"), gaps };
+}
+
+/**
+ * @param {string} source
+ * @param {{ inputName?: string }} [options]
+ * @returns {{ code: string, facts: WorkflowFacts, gaps: Gap[] }}
+ */
+export function emitGrok(source, { inputName = "<input>" } = {}) {
+  const facts = extractFacts(source);
+  const { code, gaps } = emitGrokFromFacts(facts, { inputName });
+  return { code, facts, gaps };
+}
+
+/**
+ * Read a double-quoted Rhai string field from an option map body.
+ * @param {string} body
+ * @param {string} name
+ * @returns {string | null} unescaped value
+ */
+function rhaiField(body, name) {
+  const m = body.match(new RegExp(`${name}\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`));
+  if (!m) return null;
+  try {
+    return JSON.parse(`"${m[1]}"`);
+  } catch {
+    return m[1];
+  }
+}
+
+// Extract canonical facts (the host.agent request shape) from Grok source.
+// Prompts are normalized to JS double-quoted string literals when they
+// parse; anything else passes through and is flagged at emit time.
+/**
+ * @param {string} source
+ * @returns {WorkflowFacts}
+ */
+export function extractGrokFacts(source) {
+  /** @type {WorkflowFacts} */
+  const facts = {
+    meta: null,
+    calls: [],
+    parallelSites: 0,
+    hasReturn: /complete\s*\(#/.test(source),
+  };
+  const metaMatch = source.match(/let\s+meta\s*=\s*#{/);
+  if (metaMatch) {
+    const openIdx = source.indexOf("{", metaMatch.index);
+    const closeIdx = matchDelim(source, openIdx, "{", "}");
+    const block = closeIdx > 0 ? source.slice(openIdx, closeIdx + 1) : "";
+    const titles = [...block.matchAll(/title\s*:\s*"((?:[^"\\]|\\.)*)"/g)].map((m) => {
+      try {
+        return JSON.parse(`"${m[1]}"`);
+      } catch {
+        return m[1];
+      }
+    });
+    facts.meta = {
+      name: rhaiField(block, "name"),
+      description: rhaiField(block, "description"),
+      whenToUse: rhaiField(block, "when_to_use"),
+      phases: titles,
+    };
+  }
+  const agentRe = /(?<![\w$.#])agent\s*\(/g;
+  let am;
+  while ((am = agentRe.exec(source)) !== null) {
+    const openIdx = source.indexOf("(", am.index);
+    const closeIdx = matchDelim(source, openIdx, "(", ")");
+    if (closeIdx < 0) continue;
+    const args = splitTopLevel(source.slice(openIdx + 1, closeIdx));
+    const rawPrompt = (args[0] ?? "").trim();
+    let promptSrc = rawPrompt;
+    if (/^".*"$/.test(rawPrompt)) {
+      try {
+        promptSrc = JSON.stringify(JSON.parse(rawPrompt));
+      } catch {
+        promptSrc = rawPrompt;
+      }
+    }
+    const opts = args[1] && args[1].trimStart().startsWith("#{") ? args[1] : null;
+    let body = "";
+    if (opts) {
+      const oOpen = opts.indexOf("{");
+      const oClose = matchDelim(opts, oOpen, "{", "}");
+      body = oClose > 0 ? opts.slice(oOpen, oClose + 1) : "";
+    }
+    const schemaHit = body.match(/output_schema\s*:\s*([A-Za-z_$][\w$]*)/);
+    facts.calls.push({
+      line: lineOf(source, am.index),
+      promptSrc,
+      agentType: null,
+      label: rhaiField(body, "label"),
+      phase: rhaiField(body, "phase"),
+      model: rhaiField(body, "model"),
+      schema: schemaHit ? schemaHit[1] : null,
+      schemaInline: schemaHit ? undefined : /output_schema\s*:/.test(body) || undefined,
+      capability: rhaiField(body, "capability_mode"),
+      dynamicOpts: opts == null && args[1] != null ? true : undefined,
+      inParallel:
+        /parallel\s*\([^)]*$/.test(source.slice(Math.max(0, am.index - 200), am.index)) ||
+        undefined,
+    });
+  }
+  facts.parallelSites = (source.match(/(?<![\w$.#])parallel\s*\(/g) || []).length;
+  return facts;
 }

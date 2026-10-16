@@ -28,24 +28,63 @@ Or run from source with Bun:
 
 ```bash
 bun install
-bun bin/cli.mjs path/to/workflow.js -o workflow.muse.js --report report.json
+bun bin/cli.mjs path/to/workflow.js --out workflow.muse.js --report report.json
 ```
+
+## Self-update
+
+Release binaries check GitHub Releases on every run, like the Codex CLI.
+When a newer version exists, interactive runs ask: **Update now**,
+**Skip**, or **Skip until next version** (remembered in
+`~/.config/wfport/update-state.json`). Updating replaces the binary and
+exits — rerun your command afterwards. Non-interactive runs print a
+one-line notice and continue. Skip the check with `--no-update-check` or
+`WFPORT_NO_UPDATE_CHECK=1`. Runs from source (`bun bin/cli.mjs`) never
+check: there is no installed binary to replace.
 
 ## Usage
 
 ```bash
-wfport path/to/workflow.js -o workflow.muse.js --report report.json
-wfport path/to/workflow.js --to grok -o workflow.rhai --report report.json
-# without -o the converted source goes to stdout, the report to stderr
+wfport path/to/workflow.js --out workflow.muse.js --report report.json
+wfport path/to/workflow.js --to grok --out workflow.rhai --report report.json
+wfport .grok/workflows/flow.rhai -o muse --out flow.muse.js
+# without --out the converted source goes to stdout, the report to stderr
 ```
 
-Exit 0 means a clean mechanical conversion; exit 2 means gaps need review.
+Exit 0 means a clean mechanical conversion; exit 1 is a usage or config
+error; exit 2 means gaps need review.
+
+## Sources and targets
+
+The input can be any workflow dialect. `-i` / `--input` / `--from`
+(`claude|muse|grok`) pins the source; when omitted it is inferred from the
+input path (`.claude`, `.grok`, `muse`, or `.rhai` segments), then from the
+file content, and defaults to `claude`.
+
+`-o` / `--output` / `--to` (`claude|muse|grok`) pins the target. It defaults
+to `muse` for `claude` inputs and is required otherwise — a non-Claude input
+with no `-o` flag is an error, since there is no safe default to convert to.
+
+| From   | To     | Fidelity                                                        |
+| ------ | ------ | --------------------------------------------------------------- |
+| claude | muse   | Full codemod; control flow survives                             |
+| claude | grok   | Skeleton + gaps (prompts, parallel, control flow need review)   |
+| muse   | claude | Full codemod; control flow survives                             |
+| muse   | grok   | Skeleton + gaps, same as claude → grok                          |
+| grok   | muse   | Skeleton + gaps (capability, schemas, control flow need review) |
+| grok   | claude | Skeleton + gaps, same as grok → muse                            |
+
+Passing `-o` a file path (the pre-0.2 spelling, e.g. `-o out.js`) still
+writes that file but prints a deprecation warning — use `--out` for the
+output file and `-o` for the target dialect.
 
 ## Mapping
 
-The Claude source is first normalized to canonical facts — the `host.agent`
+Every source is first normalized to canonical facts — the `host.agent`
 request shape (`input`, `label`, `phase`, `schema`, `model`, original
-`agentType`). Both emitters derive from those facts.
+`agentType`). All emitters derive from those facts, except the JS-to-JS
+ports (claude ↔ muse), which rewrite the source text directly so control
+flow survives untouched.
 
 | Canonical        | Muse Workflow                                        | Grok Build (Rhai)                                                            |
 | ---------------- | ---------------------------------------------------- | ---------------------------------------------------------------------------- |
@@ -148,7 +187,8 @@ needs a person, and the assistant that built it worked the same way.
 See [CONTRIBUTING.md](CONTRIBUTING.md). PRs run the full gate on Linux and
 macOS plus binary smoke tests; releases go through the `release` workflow
 (run it from Actions with the next version — never push tags by hand).
-Security issues: [SECURITY.md](SECURITY.md). Participation follows the
+Security issues:
+[SECURITY.md](SECURITY.md). Participation follows the
 [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## License

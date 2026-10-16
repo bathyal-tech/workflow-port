@@ -11,10 +11,9 @@ gates get reviewed.
 3. Make your change, then run the full gate: `bun run verify`
    (oxfmt check, oxlint, `tsgo --noEmit`, tests).
 4. Write commits in [conventional commits](https://www.conventionalcommits.org/)
-   style — commit-message linting is enforced, and
-   [release-please](https://github.com/googleapis/release-please) turns those
-   messages into the changelog and version bumps, so `feat:` and `fix:`
-   prefixes matter.
+   style — commit-message linting is enforced, and the `release` workflow
+   drafts its notes from those messages, so `feat:` and `fix:` prefixes
+   matter.
 5. Open a pull request against `main` using the template. CI runs the gate on
    Linux and macOS, smoke-tests the compiled binary, and verifies all release
    targets still cross-compile.

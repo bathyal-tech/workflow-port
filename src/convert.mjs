@@ -259,6 +259,26 @@ export function lineOf(source, idx) {
   return source.slice(0, idx).split("\n").length;
 }
 
+// Split a { input: EXPR, ...rest } request object. Returns null when the
+// text is not an object literal or the object has no input field.
+/**
+ * @param {string} obj
+ * @returns {{ prompt: string, rest: string } | null}
+ */
+export function splitRequestObject(obj) {
+  const trimmed = obj.trimStart();
+  if (!trimmed.startsWith("{")) return null;
+  const openIdx = obj.indexOf("{");
+  const closeIdx = matchDelim(obj, openIdx, "{", "}");
+  if (closeIdx < 0) return null;
+  const parts = splitTopLevel(obj.slice(openIdx + 1, closeIdx));
+  const at = parts.findIndex((p) => /^input\s*:/.test(p));
+  if (at < 0) return null;
+  const prompt = parts[at].slice(parts[at].indexOf(":") + 1).trim();
+  const rest = parts.filter((_, i) => i !== at).join(", ");
+  return { prompt, rest };
+}
+
 // Rewrite one agent(prompt[, opts]) call. Returns { code, gaps }.
 /**
  * @param {string} inner
