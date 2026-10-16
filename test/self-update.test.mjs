@@ -333,7 +333,10 @@ test("non-interactive runs print a notice and continue without updating", async 
   });
   assert.equal(result, "continue");
   assert.equal(readFileSync(target, "utf8"), "old-bytes");
-  assert.match(out.text(), /update available: 0\.1\.0 -> 0\.2\.0/);
+  assert.match(
+    out.text(),
+    new RegExp(`update available: ${VERSION.replace(/\./g, "\\.")} -> 0\\.2\\.0`),
+  );
 });
 
 test("CLI accepts --no-update-check and reports the embedded version", () => {
