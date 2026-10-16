@@ -41,7 +41,11 @@ const USAGE = `usage: wfport <input> [-i dialect] [-o dialect] [--out file] [--r
 Examples:
   wfport flow.js                                        # claude -> muse to stdout
   wfport flow.js --to grok --out flow.rhai
-  wfport .grok/workflows/flow.rhai -o muse --out flow.muse.js`;
+  wfport .grok/workflows/flow.rhai -o muse --out flow.muse.js
+
+Exit codes: 0 clean conversion, 1 usage or config error, 2 gaps need review.
+Without --out the converted source goes to stdout; without --report the
+gap report JSON goes to stderr.`;
 
 /**
  * @param {string} message

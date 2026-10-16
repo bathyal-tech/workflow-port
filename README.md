@@ -26,9 +26,11 @@ chmod +x wfport
 ./wfport --help
 ```
 
-Or run from source with Bun:
+Or run from source with Bun, from a checkout of this repo:
 
 ```bash
+git clone https://github.com/bathyal-tech/workflow-port.git
+cd workflow-port
 bun install
 bun bin/cli.mjs path/to/workflow.js --out workflow.muse.js --report report.json
 ```

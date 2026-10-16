@@ -34,9 +34,12 @@ chmod +x wfport
 ./wfport --help
 ```
 
-Or run from source with [Bun](https://bun.sh):
+Or run from source with [Bun](https://bun.sh) from a checkout of the
+tool repo:
 
 ```bash
+git clone https://github.com/bathyal-tech/workflow-port.git
+cd workflow-port
 bun install
 bun bin/cli.mjs --help
 ```
@@ -50,13 +53,32 @@ wfport --help
 wfport --version
 ```
 
-Typical runs:
+Typical runs (from the project that owns the workflow, not from `/tmp`):
 
 ```bash
-wfport path/to/workflow.js --out workflow.muse.js --report report.json
-wfport path/to/workflow.js --to grok --out workflow.rhai --report report.json
-wfport .grok/workflows/flow.rhai -o muse --out flow.muse.js
+wfport .claude/workflows/toil-block.js --out .muse/workflows/toil-block.js --report /tmp/toil-block.report.json
+wfport .claude/workflows/plan.js --to grok --out .grok/workflows/plan.rhai --report /tmp/plan.report.json
+wfport .grok/workflows/flow.rhai -o muse --out .muse/workflows/flow.js
 ```
+
+## Where to write the output
+
+Mirror the source path into the target dialect's directory, keeping the
+base name:
+
+- `.claude/workflows/<name>.js` → `.muse/workflows/<name>.js`
+  (Claude → Muse)
+- `.claude/workflows/<name>.js` → `.grok/workflows/<name>.rhai`
+  (Claude → Grok)
+- `.grok/workflows/<name>.rhai` → `.muse/workflows/<name>.js`
+  (Grok → Muse)
+
+Pass the mirrored path via `--out` so the finished artifact lands as an
+unstaged file inside the project under conversion — never in `/tmp`.
+Leave it unstaged so the user can diff and test it before committing.
+
+Done means both: the converted file is placed at its mirrored path,
+and the gap report has been read with every gap surfaced to the user.
 
 Notes:
 
