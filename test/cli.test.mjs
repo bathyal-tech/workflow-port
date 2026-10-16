@@ -97,3 +97,23 @@ test("--help exits 0", () => {
   assert.equal(r.status, 0);
   assert.match(r.stdout, /--input/);
 });
+
+test("--help documents the flag set, defaults, and exit codes", () => {
+  const r = runCli(["--help"]);
+  assert.equal(r.status, 0);
+  // Flag spellings the skill and README promise must appear in --help.
+  assert.match(r.stdout, /--out/);
+  assert.match(r.stdout, /--to/);
+  assert.match(r.stdout, /--from/);
+  assert.match(r.stdout, /--version/);
+  // stdout/stderr defaults and exit codes must agree with the docs.
+  assert.match(r.stdout, /stdout/);
+  assert.match(r.stdout, /stderr/);
+  assert.match(r.stdout, /Exit codes: 0.*1.*2/);
+});
+
+test("--version prints the version", () => {
+  const r = runCli(["--version"]);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /wfport \d+\.\d+\.\d+/);
+});
