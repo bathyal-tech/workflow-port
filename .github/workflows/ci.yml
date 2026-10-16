@@ -29,6 +29,8 @@ jobs:
 
   smoke:
     needs: verify
+    env:
+      WFPORT_NO_UPDATE_CHECK: "1"
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -39,12 +41,15 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run build
       - run: |
-          ./dist/wfport test/fixtures/sample.workflow.js.txt --to muse -o /tmp/smoke.muse.js --report /tmp/smoke.json
+          ./dist/wfport test/fixtures/sample.workflow.js.txt --to muse --out /tmp/smoke.muse.js --report /tmp/smoke.json
           test $? -eq 2
-          ./dist/wfport test/fixtures/sample.workflow.js.txt --to grok -o /tmp/smoke.rhai --report /tmp/smoke-grok.json
+          ./dist/wfport test/fixtures/sample.workflow.js.txt --to grok --out /tmp/smoke.rhai --report /tmp/smoke-grok.json
+          test $? -eq 2
+          ./dist/wfport /tmp/smoke.muse.js -o grok --out /tmp/smoke-back.rhai --report /tmp/smoke-back.json
           test $? -eq 2
           test -s /tmp/smoke.muse.js
           test -s /tmp/smoke.rhai
+          test -s /tmp/smoke-back.rhai
 
   cross-compile:
     needs: verify
