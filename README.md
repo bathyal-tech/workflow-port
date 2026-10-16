@@ -1,5 +1,7 @@
 # workflow-port
 
+[![skills.sh](https://skills.sh/b/bathyal-tech/workflow-port)](https://skills.sh/bathyal-tech/workflow-port)
+
 Convert [Claude Workflow](https://docs.claude.com) scripts
 (`.claude/workflows/*.js`) to
 [Muse Workflow](https://muse.ai) scripts or
@@ -41,6 +43,18 @@ exits — rerun your command afterwards. Non-interactive runs print a
 one-line notice and continue. Skip the check with `--no-update-check` or
 `WFPORT_NO_UPDATE_CHECK=1`. Runs from source (`bun bin/cli.mjs`) never
 check: there is no installed binary to replace.
+
+## Agent skill
+
+An agent skill for `wfport` ships in this repo at
+`.agents/skills/wfport/SKILL.md`. It tells coding agents to run the CLI
+(download the binary, check `--help`, convert, read the gap report)
+instead of reimplementing the conversion by hand. Install it with the
+[`skills`](https://www.skills.sh/) CLI:
+
+```bash
+npx skills add bathyal-tech/workflow-port
+```
 
 ## Usage
 
