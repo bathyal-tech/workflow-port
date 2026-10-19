@@ -1,0 +1,92 @@
+export const meta = {
+  name: "toil-shape",
+  description: "Mini toil-block shape: fragments, notes, dynamic types, model pin",
+  whenToUse: "Fixture only.",
+  phases: [{ title: "Bootstrap", detail: "open a run" }],
+};
+
+// Constraints: plain JS, no imports, and no `Date.now()` / `Math.random()` / `new Date()`
+// (comment-text mentions only — must not trip the banned-API check).
+
+const CITATION_AUDIT_MODEL = "sonnet";
+
+const INHERITED_PROPERTY = {
+  type: "boolean",
+  description: "True when an earlier step left evidence behind.",
+};
+
+const MINI_SCHEMA = {
+  type: "object",
+  required: ["status"],
+  properties: {
+    status: { type: "string", enum: ["ok", "abort"] },
+    title: { type: "string" },
+    detail: { type: "string", description: "One line for the manifest." },
+    inherited: INHERITED_PROPERTY,
+    notes: { type: "string" },
+  },
+};
+
+const agentOptions = (spec, label) => ({
+  agentType: spec.agentType,
+  phase: spec.phase,
+  label,
+  schema: spec.schema,
+});
+
+async function dispatchWithOneResume(options) {
+  const first = await agent(options.prompt, {
+    agentType: options.agentType,
+    phase: options.phase,
+    label: options.label,
+    schema: options.schema,
+  });
+  if (first) return { result: first, resumed: false };
+  const second = await agent(options.prompt, {
+    agentType: options.runnerType,
+    phase: options.phase,
+    label: `${options.label}:resume`,
+    schema: options.schema,
+  });
+  return { result: second ?? null, resumed: true };
+}
+
+phase("Bootstrap");
+log("starting");
+
+const first = await agent("Open the run.", {
+  agentType: "tl-runner",
+  phase: "Bootstrap",
+  label: "bootstrap",
+  schema: MINI_SCHEMA,
+});
+
+const axis = await agent("Review the diff.", {
+  agentType: "readonly-reviewer",
+  phase: "Review",
+  label: "review",
+  schema: MINI_SCHEMA,
+  model: CITATION_AUDIT_MODEL,
+});
+
+const codex = await agent("Post the mention with the GitHub MCP tool, never with gh.", {
+  agentType: "tl-runner",
+  phase: "Review",
+  label: "codex-request",
+  schema: MINI_SCHEMA,
+});
+
+const specs = [
+  { prompt: "Do it.", agentType: "tl-fix", phase: "Fix", label: "fix", schema: MINI_SCHEMA },
+];
+const many = await parallel(specs.map((spec) => () => agent(spec.prompt, agentOptions(spec, spec.label))));
+
+const solo = await dispatchWithOneResume({
+  agentType: "tl-select",
+  phase: "Select",
+  label: "select",
+  schema: MINI_SCHEMA,
+  prompt: "Pick one.",
+});
+
+return { first, axis, codex, many, solo };
