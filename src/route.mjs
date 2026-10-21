@@ -7,6 +7,8 @@
 // it defaults to muse only for claude sources — any other source requires
 // an explicit target.
 
+import { isMuseBody } from "./claude.mjs";
+
 /** @typedef {"claude" | "muse" | "grok"} Dialect */
 
 export const DIALECTS = ["claude", "muse", "grok"];
@@ -39,6 +41,15 @@ export function detectSource(inputPath, content, inputOpt) {
   if (p.includes("claude")) return "claude";
   if (/let\s+meta\s*=\s*#\{/.test(content) || /complete\s*\(#/.test(content)) return "grok";
   if (/function\s+workflow\s*\(\s*host\s*\)/.test(content) || /host\.agent\s*\(/.test(content))
+    return "muse";
+  // V1 body-shape Muse output: converter fingerprints, a wfport Muse
+  // header, or a bare agent({ input }) request-object call (Claude always
+  // passes the prompt first, so that shape is Muse-only).
+  if (
+    /museDispatchArgs|MUSE_ROLE_FOR|wfport:begin-helpers/.test(content) ||
+    /Converted from (Claude Workflow|Grok) .*by workflow-port/.test(content) ||
+    isMuseBody(content)
+  )
     return "muse";
   if (/export\s+const\s+meta\s*=\s*\{/.test(content)) return "claude";
   if (/(?<![\w$.])agent\s*\(/.test(content)) return "claude";

@@ -6,11 +6,15 @@
 //   phase(title), log(msg), args. Custom opts.agentType names a file under
 //   .claude/agents/<name>.md. Schemas are named consts, passed by reference.
 //
-// Target dialect (Muse Workflow tool):
-//   export default async function workflow(host) { ... }
-//   host.agent({ input, agentType, model, effort, schema, label }),
-//   host.parallel([requestObjects]), host.phase(title), host.log(msg);
-//   args / budget remain globals. Inline schemas may only use the keys
+// Target dialect (Muse Workflow tool, V1 script body):
+//   top-level await; bare globals agent, parallel, phase, log, pipeline,
+//   args, budget — no wrapper function, no export, no host object.
+//   agent({ input, agentType, model, effort, schema, label }) (positional
+//   agent(prompt, opts) also works), parallel([requestObjects]).
+//   The runner wraps the script as a function body, so any export fails
+//   the preflight while a top-level return is legal (it lands inside the
+//   runner's wrapper).
+//   Inline schemas may only use the keys
 //   type, enum, required, properties, items (<=4 KiB, depth <=16, <=16
 //   entries). Custom agentTypes do not exist: the catalogue is
 //   general-purpose | workflow-subagent, so a custom type is rewritten to
@@ -123,7 +127,8 @@ export function museHelpers(customTypes) {
     (t) => `  ${JSON.stringify(t)}: ${JSON.stringify(museRoleFor(t))},`,
   );
   return [
-    "// Muse port: host.agent resolves to an envelope { ref, data, ... } —",
+    "// wfport:begin-helpers (converter-injected Muse shims — deleted on conversion back to Claude)",
+    "// Muse port: agent resolves to an envelope { ref, data, ... } —",
     "// museResult unwraps to data, mapping errors/stalls (error_kind) to null",
     "// so callers hit the resume path instead of operating on empty values.",
     "// museDispatchArgs maps Claude-only agentTypes to general-purpose with the",
@@ -148,6 +153,7 @@ export function museHelpers(customTypes) {
     "  out.input = role ? `${role}\\n\\n${input}` : input;",
     "  return out;",
     "};",
+    "// wfport:end-helpers",
   ].join("\n");
 }
 
@@ -558,10 +564,12 @@ export function splitRequestObject(obj) {
   return { prompt, rest };
 }
 
-// Rewrite one agent(prompt[, opts]) call. The agentType is passed through
-// untouched here: the injected museDispatchArgs choke point maps custom
-// types to general-purpose at runtime (so dynamic flows like
-// spec.agentType are covered too), and agentTypes are reported globally.
+// Rewrite one agent(prompt[, opts]) call to the V1 body shape, routing the
+// dispatch through the choke points: museDispatchArgs (agentType/model
+// mapping) + museResult (envelope unwrap). The agentType is passed through
+// untouched here: the injected choke point maps custom types to
+// general-purpose at runtime (so dynamic flows like spec.agentType are
+// covered too), and agentTypes are reported globally.
 /**
  * @param {string} inner
  * @param {Gap[]} gaps
@@ -572,18 +580,21 @@ function convertAgentCall(inner, gaps, line) {
   const args = splitTopLevel(inner);
   const prompt = args[0] ?? "";
   const opts = args[1];
-  if (!opts) return { code: `host.agent({ input: ${prompt} })` };
+  if (!opts) return { code: `agent(museDispatchArgs(${prompt}, {})).then(museResult)` };
   if (!opts.startsWith("{")) {
     gaps.push({
       kind: "dynamic-options",
       line,
       detail: `options from ${opts.slice(0, 60)} — mapped via museDispatchArgs; verify agentType/schema by hand`,
     });
-    return { code: `host.agent({ input: ${prompt}, ...${opts} })` };
+    return { code: `agent(museDispatchArgs(${prompt}, { ...${opts} })).then(museResult)` };
   }
   const closeIdx = matchDelim(opts, 0, "{", "}");
   const body = opts.slice(1, closeIdx).trim();
-  return { code: `host.agent({ input: ${prompt}${body ? `, ${body}` : ""} })` };
+  return {
+    code:
+      `agent(museDispatchArgs(${prompt}${body ? `, { ${body} }` : `, {}`}))` + `.then(museResult)`,
+  };
 }
 
 /**
@@ -612,61 +623,6 @@ function stripSchemas(code, gaps) {
       kind: "schema",
       line: lineOf(code, c.openIdx),
       detail: `${c.name}: removed ${parts.join(", ")} (Muse inline schemas reject them)`,
-    });
-  }
-  return code;
-}
-
-/**
- * Route every host.agent(...) call through the choke points:
- * museDispatchArgs (agentType/model mapping) + museResult (envelope
- * unwrap). Calls whose request is not an object literal with an input
- * field are carried as (expr.input, expr) and flagged.
- * @param {string} code
- * @param {Gap[]} gaps
- * @returns {string}
- */
-function wrapHostAgentCalls(code, gaps) {
-  /** @type {{ start: number, openIdx: number, closeIdx: number }[]} */
-  const sites = [];
-  const re = /host\.agent\s*\(/g;
-  let m;
-  while ((m = re.exec(code)) !== null) {
-    const openIdx = code.indexOf("(", m.index);
-    const closeIdx = matchDelim(code, openIdx, "(", ")");
-    if (closeIdx < 0) continue;
-    sites.push({ start: m.index, openIdx, closeIdx });
-  }
-  let dynamicCount = 0;
-  for (let i = sites.length - 1; i >= 0; i -= 1) {
-    const site = sites[i];
-    if (/^\s*\.then\s*\(/.test(code.slice(site.closeIdx + 1, site.closeIdx + 8))) continue;
-    const inner = code.slice(site.openIdx + 1, site.closeIdx);
-    const args = splitTopLevel(inner);
-    const split = args.length === 1 ? splitRequestObject(args[0]) : null;
-    if (!split) {
-      const expr = inner.trim();
-      dynamicCount += 1;
-      if (expr) {
-        const replacement = `host.agent(museDispatchArgs(${expr}.input, ${expr})).then(museResult)`;
-        code = code.slice(0, site.start) + replacement + code.slice(site.closeIdx + 1);
-      } else {
-        code = `${code.slice(0, site.start)}host.agent().then(museResult)${code.slice(site.closeIdx + 1)}`;
-      }
-      continue;
-    }
-    const rest = split.rest.trim();
-    const replacement =
-      `host.agent(museDispatchArgs(${split.prompt}` +
-      `${rest ? `, { ${rest} }` : `, {}`}))` +
-      `.then(museResult)`;
-    code = code.slice(0, site.start) + replacement + code.slice(site.closeIdx + 1);
-  }
-  if (dynamicCount > 0) {
-    gaps.push({
-      kind: "dynamic-options",
-      line: 1,
-      detail: `${dynamicCount} host.agent() call(s) take a non-literal request — verify agentType/schema by hand`,
     });
   }
   return code;
@@ -733,26 +689,32 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   let code = source;
 
   // meta: drop the export; the object stays as data (Muse takes the
-  // workflow name/description at launch, not from an export).
-  const metaMatch = code.match(/export\s+const\s+meta\s*=\s*\{/);
+  // workflow name/description at launch, not from an export). Matches in
+  // comments or strings are not the meta export — codeOnly blanks those.
+  const maskedForMeta = codeOnly(code);
+  const metaMatch = /export\s+const\s+meta\s*=\s*\{/.exec(code);
   let metaName = null;
-  if (metaMatch) {
+  if (metaMatch && maskedForMeta[metaMatch.index] !== " ") {
     const nameHit = code.slice(metaMatch.index).match(/name\s*:\s*(['"])([^'"]+)\1/);
     metaName = nameHit ? nameHit[2] : null;
-    code = code.replace(
-      /export\s+const\s+meta\b/,
-      "const meta /* Muse: name/description move to the Workflow launch */",
-    );
+    code =
+      code.slice(0, metaMatch.index) +
+      "const meta /* Muse: name/description move to the Workflow launch */" +
+      code.slice(metaMatch.index + "export const meta".length);
   } else {
     gaps.push({ kind: "meta", line: 1, detail: "no export const meta found" });
   }
 
   // agent(...) calls, rewritten right-to-left so offsets stay valid.
+  // Matches inside comments or string/template text are skipped: the old
+  // regex rewrote `` `await agent()` `` inside doc comments into garbage.
   /** @type {AgentCallSite[]} */
   const calls = [];
+  const maskedForAgents = codeOnly(code);
   const agentRe = /(?<![\w$.])agent\s*\(/g;
   let am;
   while ((am = agentRe.exec(code)) !== null) {
+    if (maskedForAgents[am.index] === " ") continue;
     const openIdx = code.indexOf("(", am.index);
     const closeIdx = matchDelim(code, openIdx, "(", ")");
     if (closeIdx < 0) continue;
@@ -765,11 +727,9 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
     code = code.slice(0, call.start) + replacement + code.slice(call.closeIdx + 1);
   }
 
-  // Bare orchestration globals -> host.* methods.
-  code = code.replace(/(?<![\w$.])phase\s*\(/g, "host.phase(");
-  code = code.replace(/(?<![\w$.])log\s*\(/g, "host.log(");
-  code = code.replace(/(?<![\w$.])parallel\s*\(/g, "host.parallel(");
-  code = code.replace(/(?<![\w$.])pipeline\s*\(/g, "host.pipeline(");
+  // Bare orchestration globals (phase, log, parallel, pipeline) are already
+  // the V1 body shape — they pass through untouched. (An earlier release
+  // renamed them to host.* methods, which the runner does not provide.)
 
   // Strip Muse-rejected keys from schema-like consts, including helper
   // fragments (INHERITED_PROPERTY) that spread into schemas.
@@ -806,8 +766,8 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
       "mapped to general-purpose via museDispatchArgs with a short role prompt — refine by inlining the agent file's prompt",
   }));
 
-  // Route every dispatch through the choke points (mapping + unwrap).
-  code = wrapHostAgentCalls(code, gaps);
+  // Every dispatch already routes through the choke points (mapping +
+  // unwrap) — convertAgentCall emits that form directly.
 
   // Claude-only model pins are dropped at runtime by museDispatchArgs.
   if (/(^|[^\w$])model\s*:/.test(codeOnly(source))) {
@@ -865,7 +825,12 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
       detail: "imports/requires are not allowed in Workflow scripts",
     });
 
-  const parallelSites = (source.match(/(?<![\w$.])parallel\s*\(/g) || []).length;
+  // parallel() sites count in code only — comment text like
+  // "rebuild as parallel([...])" is not a call site.
+  const maskedSource = codeOnly(source);
+  const parallelSites = [...source.matchAll(/(?<![\w$.])parallel\s*\(/g)].filter(
+    (m) => maskedSource[/** @type {number} */ (m.index)] !== " ",
+  ).length;
   if (calls.length > 15)
     gaps.push({
       kind: "fanout",
@@ -879,13 +844,16 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
       detail: "no top-level return — Muse expects the run to end with return { status, ref, text }",
     });
 
+  // V1 body shape: header comments + injected shims, then the script
+  // itself with top-level await/return. No wrapper function, no export,
+  // no host object — the runner wraps this text as a function body.
   const header = [
     `// Converted from Claude Workflow${metaName ? ` "${metaName}"` : ""} by workflow-port.`,
     "// Review every TODO/gap in the conversion report before running.",
     "",
   ].join("\n");
   const helpers = museHelpers(customTypes);
-  const wrapped = `${header}export default async function workflow(host) {\n${helpers}\n${code}\n}\n`;
+  const wrapped = `${header}${helpers}\n${code.trimEnd()}\n`;
 
   const report = {
     input: inputName,

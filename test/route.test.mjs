@@ -26,6 +26,29 @@ test("input dialect is sniffed from content", () => {
   assert.equal(detectSource("workflows/flow.js", "const x = 1;\n", null), "claude");
 });
 
+test("V1 body-shape muse output sniffs as muse", () => {
+  const body =
+    '// Converted from Claude Workflow "sweep" by workflow-port.\n' +
+    "const museResult = (res) => res;\n" +
+    'const r = await agent(museDispatchArgs("hi", {}));\n' +
+    "return r;\n";
+  assert.equal(detectSource("workflows/flow.js", body, null), "muse");
+  // A bare agent({ input }) request-object call is Muse-shaped; a Claude
+  // prompt-first call is not.
+  assert.equal(
+    detectSource("workflows/flow.js", 'const r = await agent({ input: "hi" });\nreturn r;\n', null),
+    "muse",
+  );
+  assert.equal(
+    detectSource(
+      "workflows/flow.js",
+      'const r = await agent("hi", { label: "a" });\nreturn r;\n',
+      null,
+    ),
+    "claude",
+  );
+});
+
 test("claude inputs default to muse", () => {
   assert.equal(resolveTarget("claude", null), "muse");
   assert.equal(resolveTarget("claude", "grok"), "grok");

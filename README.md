@@ -96,22 +96,30 @@ output file and `-o` for the target dialect.
 
 ## Mapping
 
-Every source is first normalized to canonical facts — the `host.agent`
+Every source is first normalized to canonical facts — the Muse `agent`
 request shape (`input`, `label`, `phase`, `schema`, `model`, original
 `agentType`). All emitters derive from those facts, except the JS-to-JS
 ports (claude ↔ muse), which rewrite the source text directly so control
 flow survives untouched.
 
-| Canonical        | Muse Workflow                                        | Grok Build (Rhai)                                                            |
-| ---------------- | ---------------------------------------------------- | ---------------------------------------------------------------------------- |
-| run shape        | `export default async function workflow(host) { … }` | Rhai script, meta first                                                      |
-| meta             | `const meta` (name moves to launch)                  | `let meta = #{ name, description, when_to_use, phases: [#{ title }] }`       |
-| one agent        | `host.agent({ input, ... })`                         | `agent(prompt, #{ label, capability_mode, output_schema, phase })`           |
-| fan-out          | `host.parallel([requests])`                          | `parallel([#{ prompt, label, ... }])` (job list)                             |
-| phase / log      | `host.phase` / `host.log`                            | `phase` / `log`                                                              |
-| custom agentType | `general-purpose` + report                           | `capability_mode` (`read-only` for reviewer-like types, else `all`) + report |
-| schema           | inline subset checked                                | `output_schema` (re-quote as `#{ "type": ... }`) + report                    |
-| finish           | `return { status, ref, text }`                       | `complete(#{ ... })`                                                         |
+| Canonical        | Muse Workflow (V1 body)                                  | Grok Build (Rhai)                                                            |
+| ---------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| run shape        | top-level await, bare globals, no export                 | Rhai script, meta first                                                      |
+| meta             | `const meta` (name moves to launch)                      | `let meta = #{ name, description, when_to_use, phases: [#{ title }] }`       |
+| one agent        | `agent(museDispatchArgs(prompt, opts)).then(museResult)` | `agent(prompt, #{ label, capability_mode, output_schema, phase })`           |
+| fan-out          | `parallel([requests])`                                   | `parallel([#{ prompt, label, ... }])` (job list)                             |
+| phase / log      | `phase` / `log`                                          | `phase` / `log`                                                              |
+| custom agentType | `general-purpose` + report                               | `capability_mode` (`read-only` for reviewer-like types, else `all`) + report |
+| schema           | inline subset checked                                    | `output_schema` (re-quote as `#{ "type": ... }`) + report                    |
+| finish           | `return { status, ref, text }`                           | `complete(#{ ... })`                                                         |
+
+Muse output targets the V1 script-body shape the runner wraps as a function
+body: top-level `await`, bare `agent` / `parallel` / `phase` / `log` /
+`pipeline` / `args` / `budget` globals, no `export`, no `host` object. (An
+earlier release emitted the legacy `export default async function
+workflow(host)` wrapper with `host.*` calls; the runner's preflight rejects
+that shape, so it is no longer emitted — but it is still accepted on input,
+alongside the V1 body shape.)
 
 The Grok emitter emits a skeleton: meta and every agent call are lowered, but
 JS control flow, interpolated prompts, and dynamically built parallel job
@@ -132,7 +140,7 @@ sibling `../agents`) checks whether each custom type's agent file exists.
 
 Grok has a third workflow dialect, so should there be one canonical definition
 with the rest derived — or a new agnostic language? This tool's bet:
-**canonize the strictest existing dialect (Muse's `host.agent` request-object
+**canonize the strictest existing dialect (Muse's `agent` request-object
 form) and derive the others from it**, rather than inventing a fourth language.
 Muse's form is the most constrained (inline-schema subset, child caps,
 `result.ref` handoffs), so anything expressible there lowers cleanly to
@@ -140,7 +148,7 @@ Claude's looser form; the reverse needs exactly the gap report this tool emits.
 A new agnostic DSL would also need to pick a side on semantics that genuinely
 differ (parallel-null-on-throw, resume replay, schema strictness) — that's a
 runtime project, not a converter. If a canonical IR emerges, it should be
-Muse's module shape, with emitters, not a fresh syntax.
+Muse's script-body shape, with emitters, not a fresh syntax.
 
 ## Converted agents
 

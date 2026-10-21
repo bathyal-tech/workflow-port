@@ -1,13 +1,16 @@
-// Muse Workflow as a source and target.
+// Muse Workflow as a source and target (V1 script body: top-level await,
+// bare agent/parallel/phase/log globals, no wrapper, no export, no host).
 //
-// Muse sources already use the canonical host.agent request-object shape,
-// so extraction is mechanical: input becomes the prompt, the remaining
-// object fields map one-to-one. Muse has no meta export (name/description
-// move to the Workflow launch), so every conversion away from Muse reports
-// a meta gap, and every conversion to Muse reports one when the incoming
-// meta has nowhere to go.
+// Muse sources use the canonical agent request-object shape, so extraction
+// is mechanical: input becomes the prompt, the remaining object fields map
+// one-to-one. Both the legacy wrapper shape (export default async function
+// workflow(host) with host.* calls) and the V1 body shape (bare calls) are
+// accepted as sources. Muse has no meta export (name/description move to
+// the Workflow launch), so every conversion away from Muse reports a meta
+// gap, and every conversion to Muse reports one when the incoming meta has
+// nowhere to go.
 
-import { matchDelim, splitTopLevel, splitRequestObject, lineOf } from "./convert.mjs";
+import { matchDelim, splitTopLevel, splitRequestObject, lineOf, codeOnly } from "./convert.mjs";
 import { field, fieldIdent } from "./grok.mjs";
 
 /**
@@ -15,7 +18,35 @@ import { field, fieldIdent } from "./grok.mjs";
  * @typedef {import("./grok.mjs").WorkflowFacts} WorkflowFacts
  */
 
-// Extract canonical facts from a Muse Workflow module.
+// Split a museDispatchArgs(prompt, opts) choke call back into its prompt
+// and options source. Returns null when the text is not that shape. A
+// non-object opts expression comes back as a `...expr` spread remainder so
+// callers can re-enclose it in braces.
+/**
+ * @param {string} expr
+ * @returns {{ prompt: string, rest: string } | null}
+ */
+export function splitMuseDispatch(expr) {
+  const m = /^\s*museDispatchArgs\s*\(/.exec(expr);
+  if (!m) return null;
+  const openIdx = expr.indexOf("(", m.index);
+  const closeIdx = matchDelim(expr, openIdx, "(", ")");
+  if (closeIdx < 0 || expr.slice(closeIdx + 1).trim() !== "") return null;
+  const args = splitTopLevel(expr.slice(openIdx + 1, closeIdx));
+  if (!args[0]) return null;
+  const opts = (args[1] ?? "").trim();
+  if (!opts || opts === "{}") return { prompt: args[0], rest: "" };
+  if (!opts.startsWith("{")) return { prompt: args[0], rest: `...${opts}` };
+  const bodyClose = matchDelim(opts, 0, "{", "}");
+  if (bodyClose < 0 || opts.slice(bodyClose + 1).trim() !== "") {
+    return { prompt: args[0], rest: `...${opts}` };
+  }
+  return { prompt: args[0], rest: opts.slice(1, bodyClose).trim() };
+}
+
+// Extract canonical facts from a Muse Workflow script, in either the
+// legacy wrapper shape (host.agent) or the V1 body shape (bare agent,
+// possibly routed through the museDispatchArgs choke point).
 /**
  * @param {string} source
  * @returns {WorkflowFacts}
@@ -25,24 +56,49 @@ export function extractMuseFacts(source) {
   const facts = {
     meta: null,
     calls: [],
-    parallelSites: (source.match(/host\.parallel\s*\(/g) || []).length,
+    parallelSites: 0,
     hasReturn: /^\s*return\b/m.test(source),
   };
-  const agentRe = /host\.agent\s*\(/g;
-  let am;
-  while ((am = agentRe.exec(source)) !== null) {
-    const openIdx = source.indexOf("(", am.index);
-    const closeIdx = matchDelim(source, openIdx, "(", ")");
-    if (closeIdx < 0) continue;
-    // host.agent takes a single request object; fields other than input
-    // are read from the remainder so a prompt mentioning "label:" cannot
-    // shadow the real options.
+  const masked = codeOnly(source);
+  /** @param {RegExp} re @returns {number} */
+  const countCodeSites = (re) => {
+    let n = 0;
+    let m;
+    re.lastIndex = 0;
+    while ((m = re.exec(source)) !== null) {
+      if (masked[/** @type {number} */ (m.index)] !== " ") n += 1;
+    }
+    return n;
+  };
+  facts.parallelSites =
+    countCodeSites(/(?<![\w$.])host\.parallel\s*\(/g) + countCodeSites(/(?<![\w$.])parallel\s*\(/g);
+  const siteRes = [/(?<![\w$.])host\.agent\s*\(/g, /(?<![\w$.])agent\s*\(/g];
+  /** @type {{ start: number, openIdx: number, closeIdx: number }[]} */
+  const sites = [];
+  for (const re of siteRes) {
+    let am;
+    while ((am = re.exec(source)) !== null) {
+      if (masked[am.index] === " ") continue;
+      const openIdx = source.indexOf("(", am.index);
+      const closeIdx = matchDelim(source, openIdx, "(", ")");
+      if (closeIdx < 0) continue;
+      sites.push({ start: am.index, openIdx, closeIdx });
+    }
+  }
+  sites.sort((a, b) => a.start - b.start);
+  for (const site of sites) {
+    const openIdx = site.openIdx;
+    const closeIdx = site.closeIdx;
+    // The agent call takes a single request object; fields other than
+    // input are read from the remainder so a prompt mentioning "label:"
+    // cannot shadow the real options. Choke-routed dispatches
+    // (agent(museDispatchArgs(prompt, opts))) unwrap to the same shape.
     const args = splitTopLevel(source.slice(openIdx + 1, closeIdx));
-    const split = args[0] ? splitRequestObject(args[0]) : null;
+    const split = args[0] ? (splitRequestObject(args[0]) ?? splitMuseDispatch(args[0])) : null;
     const restBody = split ? `{ ${split.rest} }` : "";
     const schema = split ? fieldIdent(restBody, "schema") : null;
     facts.calls.push({
-      line: lineOf(source, am.index),
+      line: lineOf(source, site.start),
       promptSrc: split ? split.prompt : (args[0] ?? ""),
       agentType: split ? field(restBody, "agentType") : null,
       label: split ? field(restBody, "label") : null,
@@ -53,7 +109,7 @@ export function extractMuseFacts(source) {
       capability: undefined,
       dynamicOpts: split == null ? true : undefined,
       inParallel:
-        /parallel\s*\([^)]*$/.test(source.slice(Math.max(0, am.index - 200), am.index)) ||
+        /parallel\s*\([^)]*$/.test(source.slice(Math.max(0, site.start - 200), site.start)) ||
         undefined,
     });
   }
@@ -88,7 +144,7 @@ function jsField(value, key) {
   return value == null ? null : `${key}: ${JSON.stringify(value)}`;
 }
 
-// Lower canonical facts to a Muse Workflow module skeleton.
+// Lower canonical facts to a Muse Workflow script skeleton (V1 body shape).
 /**
  * @param {WorkflowFacts} facts
  * @param {{ inputName?: string, sourceName?: string }} [options]
@@ -104,10 +160,10 @@ export function emitMuseFromFacts(
   const out = [];
   out.push(`// Converted from ${sourceName} ${inputName} by workflow-port.`);
   out.push("// Review every TODO/gap in the conversion report before running.");
-  out.push("export default async function workflow(host) {");
+  out.push("");
 
   if (facts.meta?.name)
-    out.push(`  // Meta "${facts.meta.name}" — pass name/description at the Workflow launch.`);
+    out.push(`// Meta "${facts.meta.name}" — pass name/description at the Workflow launch.`);
   gaps.push({
     kind: "meta",
     line: 1,
@@ -151,8 +207,7 @@ export function emitMuseFromFacts(
       gaps.push({
         kind: "dynamic-options",
         line: call.line,
-        detail:
-          "options built dynamically — map agentType/schema onto the host.agent request by hand",
+        detail: "options built dynamically — map agentType/schema onto the agent request by hand",
       });
     }
     /** @type {string[]} */
@@ -167,9 +222,9 @@ export function emitMuseFromFacts(
       if (rendered) opts.push(rendered);
     }
     const promptExpr = prompt ?? `"TODO: translate prompt (source line ${call.line})"`;
-    out.push(`  // source line ${call.line}`);
+    out.push(`// source line ${call.line}`);
     out.push(
-      `  const r${seq} = await host.agent({ input: ${promptExpr}${opts.length ? `, ${opts.join(", ")}` : ""} });`,
+      `const r${seq} = await agent({ input: ${promptExpr}${opts.length ? `, ${opts.join(", ")}` : ""} });`,
     );
   }
 
@@ -177,9 +232,9 @@ export function emitMuseFromFacts(
     gaps.push({
       kind: "parallel",
       line: 1,
-      detail: `${facts.parallelSites} parallel() site(s) — rebuild the job list as host.parallel([requests])`,
+      detail: `${facts.parallelSites} parallel() site(s) — rebuild the job list as parallel([requests])`,
     });
-    out.push("  // TODO: rebuild each parallel() fan-out as host.parallel([requests]), then:");
+    out.push("// TODO: rebuild each parallel() fan-out as parallel([requests]), then:");
   }
 
   gaps.push({
@@ -187,9 +242,9 @@ export function emitMuseFromFacts(
     line: 1,
     detail: "Rhai control flow was not translated — rewrite branching/loops by hand",
   });
-  out.push("  // TODO: map the Grok complete() value here.");
+  out.push("// TODO: map the Grok complete() value here.");
   out.push(
-    `  return { status: "converted", ref: ${seq > 0 ? `r${seq}` : "null"}, text: "converted" };`,
+    `return { status: "converted", ref: ${seq > 0 ? `r${seq}` : "null"}, text: "converted" };`,
   );
   if (!facts.hasReturn) {
     gaps.push({
@@ -198,7 +253,6 @@ export function emitMuseFromFacts(
       detail: "no complete() — end the run with return { status, ref, text }",
     });
   }
-  out.push("}");
   out.push("");
 
   return { code: out.join("\n"), gaps };
