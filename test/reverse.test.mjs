@@ -94,16 +94,50 @@ test("grok facts: meta, labels, capability, terminal complete", () => {
 test("grok->muse: labels pass through, read-only and schema need review", () => {
   const facts = extractGrokFacts(GROK_SRC);
   const { code, gaps } = emitMuseFromFacts(facts, { inputName: "flow.rhai" });
-  assert.match(code, /export default async function workflow\(host\)/);
-  assert.match(
-    code,
-    /host\.agent\(\{ input: "First prompt", label: "first", phase: "Bootstrap" \}\)/,
-  );
-  assert.match(code, /return \{ status: "converted", ref: r1, text: "converted" \};/);
+  // V1 body shape: no wrapper, no export, bare agent call.
+  assert.doesNotMatch(code, /export default async function workflow\(host\)/);
+  assert.doesNotMatch(code, /^\s*export\b/m);
+  assert.match(code, /agent\(\{ input: "First prompt", label: "first", phase: "Bootstrap" \}\)/);
+  assert.match(code, /^return \{ status: "converted", ref: r1, text: "converted" \};/m);
   assert.ok(gaps.some((g) => g.kind === "meta"));
   assert.ok(gaps.some((g) => g.kind === "capability"));
   assert.ok(gaps.some((g) => g.kind === "control-flow"));
   assert.ok(!gaps.some((g) => g.kind === "return"));
+});
+
+test("muse body->claude: choke unwrapped, shims stripped, meta restored", () => {
+  const { code: museCode } = convert(
+    'export const meta = { name: "sweep", description: "d", whenToUse: "w", phases: [] };\n' +
+      'const r = await agent("Do it", { agentType: "bg-fix", label: "first" });\n' +
+      'const pair = await parallel([() => agent("A", { label: "a" })]);\n' +
+      "return { r, pair };\n",
+    { inputName: "sweep.js" },
+  );
+  const { code, report } = convertMuseToClaude(museCode, { inputName: "sweep.muse.js" });
+  assert.doesNotMatch(code, /museDispatchArgs|museResult|MUSE_ROLE_FOR/);
+  assert.doesNotMatch(code, /host\./);
+  assert.match(code, /export const meta = \{/);
+  assert.match(code, /agent\("Do it", \{ agentType: "bg-fix", label: "first" \}\)/);
+  assert.match(code, /parallel\(\[\(\) => agent\("A", \{ label: "a" \}\)\]\)/);
+  assert.match(code, /return \{ r, pair \};/);
+  // No wrapper gap (body shape recognized), no meta gap (carried meta restored).
+  assert.ok(!report.gaps.some((g) => g.kind === "wrapper"));
+  assert.ok(!report.gaps.some((g) => g.kind === "meta"));
+  assert.equal(report.metaName, "sweep");
+  assert.ok(report.gaps.some((g) => g.kind === "agentType"));
+});
+
+test("muse body facts: choke-routed calls recover prompt and options", () => {
+  const { code } = convert(
+    'const r = await agent("Do it", { agentType: "bg-fix" });\nreturn r;\n',
+    {
+      inputName: "s.js",
+    },
+  );
+  const facts = extractMuseFacts(code);
+  assert.equal(facts.calls.length, 1);
+  assert.equal(facts.calls[0].promptSrc, '"Do it"');
+  assert.equal(facts.calls[0].agentType, "bg-fix");
 });
 
 test("grok->claude: meta synthesized, calls lowered, result returned", () => {

@@ -17,14 +17,18 @@ const here = dirname(fileURLToPath(import.meta.url));
 const sample = readFileSync(join(here, "fixtures", "sample.workflow.js.txt"), "utf8");
 const toilShape = readFileSync(join(here, "fixtures", "toil-shape.workflow.js.txt"), "utf8");
 
-test("mechanical mapping: wrapper, host.agent, host.phase/log/parallel", () => {
+test("mechanical mapping: V1 body shape with bare globals", () => {
   const { code } = convert(sample, { inputName: "sample.workflow.js" });
-  assert.match(code, /export default async function workflow\(host\)/);
-  assert.match(code, /host\.agent\(museDispatchArgs\(`Do the thing/);
-  assert.match(code, /host\.phase\("Bootstrap"\)/);
-  assert.match(code, /host\.log\("starting"\)/);
-  assert.match(code, /host\.parallel\(\[/);
+  // No wrapper, no export keyword, no host object — the runner wraps this as a body.
+  assert.doesNotMatch(code, /export default async function workflow\(host\)/);
+  assert.doesNotMatch(code, /^\s*export\b/m);
+  assert.doesNotMatch(code, /host\./);
+  assert.match(code, /agent\(museDispatchArgs\(`Do the thing/);
+  assert.match(code, /phase\("Bootstrap"\)/);
+  assert.match(code, /log\("starting"\)/);
+  assert.match(code, /parallel\(\[/);
   assert.match(code, /schema: RESULT_SCHEMA/);
+  assert.match(code, /^return \{ first, pair \};/m);
 });
 
 test("custom agentType is mapped at runtime and reported", () => {
@@ -33,9 +37,8 @@ test("custom agentType is mapped at runtime and reported", () => {
   assert.match(code, /agentType: "bg-fix"/);
   assert.match(code, /"bg-fix": "You are a bg-fix agent/);
   assert.match(code, /"readonly-reviewer": "You are a read-only reviewer/);
-  // No raw host.agent call keeps a custom type: every dispatch goes
-  // through museDispatchArgs and unwraps with museResult.
-  assert.doesNotMatch(code, /host\.agent\(\{ input:/);
+  // Every dispatch goes through museDispatchArgs and unwraps with museResult.
+  assert.doesNotMatch(code, /(?<![\w$.])agent\(\{ input:/);
   const values = report.agentTypes.map((a) => a.value).sort();
   assert.deepEqual(values, ["bg-fix", "readonly-reviewer"]);
 });
@@ -86,20 +89,50 @@ test("dynamic options are spread and flagged", () => {
   const { code, report } = convert(src, { inputName: "dyn.js" });
   assert.match(
     code,
-    /host\.agent\(museDispatchArgs\(p, \{ \.\.\.agentOptions\(spec, spec\.label\) \}\)\)\.then\(museResult\)/,
+    /agent\(museDispatchArgs\(p, \{ \.\.\.agentOptions\(spec, spec\.label\) \}\)\)\.then\(museResult\)/,
   );
   assert.ok(report.gaps.some((g) => g.kind === "dynamic-options"));
+});
+
+test("agent() calls without options still route through the choke point", () => {
+  const { code } = convert("const r = await agent(p);\nreturn r;\n", { inputName: "bare.js" });
+  assert.match(code, /agent\(museDispatchArgs\(p, \{\}\)\)\.then\(museResult\)/);
+});
+
+test("agent-looking text in comments and strings is left alone", () => {
+  const src = [
+    "// `await agent()` is the completion barrier.",
+    "const doc = `call agent(p, { label: 'x' }) or phase(\"Y\") when done`;",
+    "const r = await agent(p, { label: 'real' });",
+    "return r;",
+  ].join("\n");
+  const { code } = convert(src, { inputName: "comments.js" });
+  assert.match(code, /\/\/ `await agent\(\)` is the completion barrier\./);
+  assert.match(code, /call agent\(p, \{ label: 'x' \}\) or phase\("Y"\) when done/);
+  assert.match(code, /agent\(museDispatchArgs\(p, \{ label: 'real' \}\)\)\.then\(museResult\)/);
+});
+
+test("converted output compiles as a runner-wrapped body (preflight shape)", async () => {
+  const vm = await import("node:vm");
+  for (const name of ["sample.workflow.js.txt", "toil-shape.workflow.js.txt"]) {
+    const src = readFileSync(join(here, "fixtures", name), "utf8");
+    const { code } = convert(src, { inputName: name });
+    const wrapped =
+      "async function __muse_workflow(agent, parallel, phase, log, pipeline, args, budget) {\n" +
+      `${code}\n}`;
+    vm.compileFunction(wrapped, []);
+  }
 });
 
 test("envelope unwrap: helper maps error_kind/null to null, data to data", () => {
   const { code } = convert(sample, { inputName: "sample.workflow.js" });
   assert.match(code, /const museResult = \(res\) => \{/);
   assert.match(code, /const museDispatchArgs = \(input, opts\) => \{/);
-  const dispatches = [...code.matchAll(/host\.agent\(/g)].length;
+  const dispatches = [...code.matchAll(/museDispatchArgs\(/g)].length;
   const unwrapped = [...code.matchAll(/\.then\(museResult\)/g)].length;
   assert.ok(dispatches > 0);
   assert.equal(unwrapped, dispatches);
-  const museResult = new Function(`${museHelpers([])}; return museResult;`)();
+  const museResult = new Function(`${museHelpers([])}\n; return museResult;`)();
   assert.equal(museResult(null), null);
   assert.equal(museResult(undefined), null);
   assert.equal(museResult({ error_kind: "stalled" }), null);
@@ -115,7 +148,7 @@ test("toil-shape: fragments, notes, titles, dynamic types, model pin, mcp", () =
   assert.match(code, /"tl-select": "You are the toil-block selector/);
   assert.match(code, /"tl-fix": "You are the toil-block fixer/);
   assert.match(code, /"readonly-reviewer": "You are a read-only reviewer/);
-  const dispatches = [...code.matchAll(/host\.agent\(/g)].length;
+  const dispatches = [...code.matchAll(/museDispatchArgs\(/g)].length;
   assert.ok(dispatches >= 6);
   assert.equal([...code.matchAll(/\.then\(museResult\)/g)].length, dispatches);
   // Fragment + schema descriptions stripped, notes dropped, titles kept.

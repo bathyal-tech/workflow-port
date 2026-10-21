@@ -1,6 +1,6 @@
 // Grok Build (Rhai) emitter — derives from the same canonical call-site
 // facts as the Muse emitter, per the hub-and-spoke design: Muse's
-// host.agent request-object shape is canonical; Claude and Grok are derived.
+// agent request-object shape is canonical; Claude and Grok are derived.
 //
 // Grok dialect (xai-workflow, .grok/workflows/*.rhai):
 //   let meta = #{ name, description, when_to_use, phases: [#{ title, detail }] };
@@ -101,7 +101,7 @@ function rhaiPrompt(promptSrc) {
   return null;
 }
 
-// Extract canonical facts (the host.agent request shape) from Claude source.
+// Extract canonical facts (the agent request shape) from Claude source.
 /**
  * @param {string} source
  * @returns {WorkflowFacts}
@@ -169,7 +169,7 @@ export function emitGrokFromFacts(
   /** @type {string[]} */
   const out = [];
   out.push(`// Grok Build workflow derived from ${sourceName} ${inputName} via the`);
-  out.push("// canonical host.agent form. Skeleton: translate flagged prompts and");
+  out.push("// canonical agent-request form. Skeleton: translate flagged prompts and");
   out.push("// control flow by hand before running.");
   out.push("");
 
@@ -315,7 +315,7 @@ function rhaiField(body, name) {
   }
 }
 
-// Extract canonical facts (the host.agent request shape) from Grok source.
+// Extract canonical facts (the agent request shape) from Grok source.
 // Prompts are normalized to JS double-quoted string literals when they
 // parse; anything else passes through and is flagged at emit time.
 /**

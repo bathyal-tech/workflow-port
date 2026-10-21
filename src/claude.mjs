@@ -1,15 +1,19 @@
 // Claude Workflow as a target.
 //
 // Muse sources are converted by text transform (both dialects are JS, so
-// control flow survives): the workflow(host) wrapper is unwrapped,
-// host.agent({ input, ... }) becomes agent(input, { ... }), request objects
-// become parallel thunks, and host.phase/log/pipeline go bare. Grok sources
-// arrive as canonical facts and are lowered to a skeleton with gaps, the
-// same way the Grok emitter treats JS control flow.
+// control flow survives): the legacy workflow(host) wrapper is unwrapped
+// (V1 body sources have no wrapper), choke-routed dispatches
+// (agent(museDispatchArgs(prompt, opts)).then(museResult), in either the
+// bare or the legacy host.agent form) are restored to agent(prompt, opts),
+// request objects become parallel thunks, converter-injected shims are
+// stripped, and host.phase/log/pipeline go bare. Grok sources arrive as
+// canonical facts and are lowered to a skeleton with gaps, the same way
+// the Grok emitter treats JS control flow.
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { matchDelim, splitTopLevel, splitRequestObject, lineOf } from "./convert.mjs";
+import { matchDelim, splitTopLevel, splitRequestObject, lineOf, codeOnly } from "./convert.mjs";
+import { splitMuseDispatch } from "./muse.mjs";
 
 /**
  * @typedef {import("./convert.mjs").Gap} Gap
@@ -50,7 +54,79 @@ function flagAgentType(rest, gaps, line) {
   }
 }
 
-// Convert a Muse Workflow module to a Claude Workflow script.
+// A Muse V1 body source carries converter fingerprints: the choke call,
+// the role map, or a wfport Muse header. Anything else without the legacy
+// wrapper is ambiguous with Claude (both use bare agent calls), so only
+// then is the wrapper gap reported.
+/**
+ * @param {string} code
+ * @returns {boolean}
+ */
+export function isMuseBody(code) {
+  if (/museDispatchArgs|MUSE_ROLE_FOR|wfport:begin-helpers/.test(code)) return true;
+  if (/Converted from (Claude Workflow|Grok) .*by workflow-port/.test(code)) return true;
+  const masked = codeOnly(code);
+  const re = /(?<![\w$.])(?:host\.)?agent\s*\(/g;
+  let m;
+  while ((m = re.exec(code)) !== null) {
+    if (masked[m.index] === " ") continue;
+    const openIdx = code.indexOf("(", m.index);
+    const closeIdx = matchDelim(code, openIdx, "(", ")");
+    if (closeIdx < 0) continue;
+    const args = splitTopLevel(code.slice(openIdx + 1, closeIdx));
+    // agent({ input, ... }) with a single request object is the Muse call
+    // shape — Claude always passes the prompt first.
+    if (args.length === 1 && splitRequestObject(args[0])) return true;
+    // host.agent in any form is Muse-shaped.
+    if (/^host\./.test(code.slice(m.index, m.index + 5))) return true;
+  }
+  return false;
+}
+
+// Strip the converter-injected Muse shim block (wfport:begin-helpers
+// through wfport:end-helpers) so it does not pollute the Claude script.
+/**
+ * @param {string} code
+ * @returns {string}
+ */
+function stripMuseHelpers(code) {
+  const begin = code.indexOf("// wfport:begin-helpers");
+  if (begin < 0) return code;
+  const endMarker = "// wfport:end-helpers";
+  const endIdx = code.indexOf(endMarker, begin);
+  if (endIdx < 0) return code;
+  const endNl = code.indexOf("\n", endIdx);
+  const after = endNl < 0 ? code.length : endNl + 1;
+  const lineStart = code.lastIndexOf("\n", begin - 1) + 1;
+  return code.slice(0, lineStart) + code.slice(after);
+}
+
+// Remove the `host.` prefix from host.<name>( calls in code, leaving
+// comments and string/template text untouched.
+/**
+ * @param {string} code
+ * @param {string} name
+ * @returns {string}
+ */
+function unhost(code, name) {
+  const re = new RegExp(`(?<![\\w$.])host\\.${name}\\s*\\(`, "g");
+  const masked = codeOnly(code);
+  /** @type {number[]} */
+  const starts = [];
+  let m;
+  while ((m = re.exec(code)) !== null) {
+    if (masked[m.index] === " ") continue;
+    starts.push(m.index);
+  }
+  for (let i = starts.length - 1; i >= 0; i -= 1) {
+    const s = starts[i];
+    code = code.slice(0, s) + code.slice(s + "host.".length);
+  }
+  return code;
+}
+
+// Convert a Muse Workflow script (legacy wrapper or V1 body shape) to a
+// Claude Workflow script.
 /**
  * @param {string} source
  * @param {{ inputName?: string, agentsDir?: string | null }} [options]
@@ -76,7 +152,7 @@ export function convertMuseToClaude(source, { inputName = "<input>", agentsDir =
         detail: "could not find the workflow(host) closing brace — check the unwrap by hand",
       });
     }
-  } else {
+  } else if (!isMuseBody(code)) {
     gaps.push({
       kind: "wrapper",
       line: 1,
@@ -84,20 +160,61 @@ export function convertMuseToClaude(source, { inputName = "<input>", agentsDir =
     });
   }
 
-  /** @type {{ start: number, openIdx: number, closeIdx: number, line: number }[]} */
-  const calls = [];
-  const agentRe = /host\.agent\s*\(/g;
-  let am;
-  while ((am = agentRe.exec(code)) !== null) {
-    const openIdx = code.indexOf("(", am.index);
-    const closeIdx = matchDelim(code, openIdx, "(", ")");
-    if (closeIdx < 0) continue;
-    calls.push({ start: am.index, openIdx, closeIdx, line: lineOf(code, am.index) });
+  code = stripMuseHelpers(code);
+
+  // A carried Claude meta (`const meta /* Muse: ... */ =`, left by a
+  // Claude -> Muse run) becomes the export again instead of a TODO stub.
+  let carriedMeta = false;
+  const metaCarry = /const meta\s*\/\* Muse:[^*]*\*\/\s*=\s*\{/.exec(code);
+  if (metaCarry && codeOnly(code)[metaCarry.index] !== " ") {
+    code =
+      code.slice(0, metaCarry.index) +
+      "export const meta = {" +
+      code.slice(metaCarry.index + metaCarry[0].length);
+    carriedMeta = true;
   }
-  for (let i = calls.length - 1; i >= 0; i -= 1) {
-    const call = calls[i];
+
+  /** @type {{ start: number, openIdx: number, closeIdx: number, line: number, isHost: boolean }[]} */
+  const calls = [];
+  const maskedCalls = codeOnly(code);
+  for (const shape of [
+    { re: /(?<![\w$.])host\.agent\s*\(/g, isHost: true },
+    { re: /(?<![\w$.])agent\s*\(/g, isHost: false },
+  ]) {
+    let am;
+    while ((am = shape.re.exec(code)) !== null) {
+      if (maskedCalls[am.index] === " ") continue;
+      const openIdx = code.indexOf("(", am.index);
+      const closeIdx = matchDelim(code, openIdx, "(", ")");
+      if (closeIdx < 0) continue;
+      calls.push({
+        start: am.index,
+        openIdx,
+        closeIdx,
+        line: lineOf(code, am.index),
+        isHost: shape.isHost,
+      });
+    }
+  }
+  calls.sort((a, b) => b.start - a.start);
+  for (const call of calls) {
+    const inner = code.slice(call.openIdx + 1, call.closeIdx);
+    // Choke-routed dispatch (new body shape and legacy 0.1.2 output):
+    // agent(museDispatchArgs(prompt, opts)).then(museResult).
+    const choke = splitMuseDispatch(inner);
+    if (choke) {
+      flagAgentType(choke.rest, gaps, call.line);
+      let end = call.closeIdx + 1;
+      const thenMatch = /^\s*\.then\s*\(\s*museResult\s*\)/.exec(code.slice(end));
+      if (thenMatch) end += thenMatch[0].length;
+      code =
+        `${code.slice(0, call.start)}agent(${choke.prompt}` +
+        `${choke.rest ? `, { ${choke.rest} }` : ""})${code.slice(end)}`;
+      continue;
+    }
+    if (!call.isHost) continue; // already a Claude-shape bare call
     // host.agent takes a single request object, not (prompt, opts).
-    const args = splitTopLevel(code.slice(call.openIdx + 1, call.closeIdx));
+    const args = splitTopLevel(inner);
     const first = args[0] ?? "";
     if (args.length > 1) {
       gaps.push({
@@ -122,18 +239,24 @@ export function convertMuseToClaude(source, { inputName = "<input>", agentsDir =
       `${split.rest ? `, { ${split.rest} }` : ""})${code.slice(call.closeIdx + 1)}`;
   }
 
-  const parallelRe = /host\.parallel\s*\(/g;
-  /** @type {{ start: number, openIdx: number, closeIdx: number }[]} */
+  /** @type {{ start: number, openIdx: number, closeIdx: number, isHost: boolean }[]} */
   const parallelSites = [];
-  let pm;
-  while ((pm = parallelRe.exec(code)) !== null) {
-    const openIdx = code.indexOf("(", pm.index);
-    const closeIdx = matchDelim(code, openIdx, "(", ")");
-    if (closeIdx < 0) continue;
-    parallelSites.push({ start: pm.index, openIdx, closeIdx });
+  const maskedParallel = codeOnly(code);
+  for (const shape of [
+    { re: /(?<![\w$.])host\.parallel\s*\(/g, isHost: true },
+    { re: /(?<![\w$.])parallel\s*\(/g, isHost: false },
+  ]) {
+    let pm;
+    while ((pm = shape.re.exec(code)) !== null) {
+      if (maskedParallel[pm.index] === " ") continue;
+      const openIdx = code.indexOf("(", pm.index);
+      const closeIdx = matchDelim(code, openIdx, "(", ")");
+      if (closeIdx < 0) continue;
+      parallelSites.push({ start: pm.index, openIdx, closeIdx, isHost: shape.isHost });
+    }
   }
-  for (let i = parallelSites.length - 1; i >= 0; i -= 1) {
-    const site = parallelSites[i];
+  parallelSites.sort((a, b) => b.start - a.start);
+  for (const site of parallelSites) {
     const inner = code.slice(site.openIdx + 1, site.closeIdx);
     const arrOpen = inner.indexOf("[");
     const arrClose = arrOpen >= 0 ? matchDelim(inner, arrOpen, "[", "]") : -1;
@@ -156,6 +279,8 @@ export function convertMuseToClaude(source, { inputName = "<input>", agentsDir =
           return `() => agent(${split.prompt}${split.rest ? `, { ${split.rest} }` : ""})`;
         }
       }
+      // Already a thunk — the agent pass above normalized its inner call.
+      if (/^\(\)\s*=>\s*agent\s*\(/.test(trimmed)) return trimmed;
       if (/^agent\s*\(/.test(trimmed)) return `() => ${trimmed}`;
       gaps.push({
         kind: "parallel",
@@ -169,9 +294,9 @@ export function convertMuseToClaude(source, { inputName = "<input>", agentsDir =
       `${code.slice(site.closeIdx + 1)}`;
   }
 
-  code = code.replace(/host\.phase\s*\(/g, "phase(");
-  code = code.replace(/host\.log\s*\(/g, "log(");
-  code = code.replace(/host\.pipeline\s*\(/g, "pipeline(");
+  code = unhost(code, "phase");
+  code = unhost(code, "log");
+  code = unhost(code, "pipeline");
 
   if (/schema\s*:\s*\{/.test(code)) {
     gaps.push({
@@ -218,29 +343,45 @@ export function convertMuseToClaude(source, { inputName = "<input>", agentsDir =
       "point the call at a real agent file — Muse built-ins have no .claude/agents equivalent",
   }));
 
-  const header = [
-    `// Converted from Muse Workflow ${inputName} by workflow-port.`,
-    "// Review every TODO/gap in the conversion report before running.",
-    "",
-    "export const meta = {",
-    '  name: "TODO: workflow name",',
-    '  description: "TODO: workflow description",',
-    '  whenToUse: "TODO: when to use this workflow",',
-    "  phases: [],",
-    "};",
-    "",
-  ].join("\n");
-  gaps.push({
-    kind: "meta",
-    line: 1,
-    detail: "no meta export in a Muse source — fill in name/description/whenToUse",
-  });
+  // A carried meta was restored to its export above, so no TODO stub and
+  // no meta gap; every other Muse source needs name/description/whenToUse.
+  const header = carriedMeta
+    ? [
+        `// Converted from Muse Workflow ${inputName} by workflow-port.`,
+        "// Review every TODO/gap in the conversion report before running.",
+        "",
+      ].join("\n")
+    : [
+        `// Converted from Muse Workflow ${inputName} by workflow-port.`,
+        "// Review every TODO/gap in the conversion report before running.",
+        "",
+        "export const meta = {",
+        '  name: "TODO: workflow name",',
+        '  description: "TODO: workflow description",',
+        '  whenToUse: "TODO: when to use this workflow",',
+        "  phases: [],",
+        "};",
+        "",
+      ].join("\n");
+  if (!carriedMeta) {
+    gaps.push({
+      kind: "meta",
+      line: 1,
+      detail: "no meta export in a Muse source — fill in name/description/whenToUse",
+    });
+  }
 
+  /** @type {string | null} */
+  let metaName = null;
+  if (carriedMeta) {
+    const nameHit = code.match(/export\s+const\s+meta\s*=\s*\{[^}]*?name\s*:\s*(['"])([^'"]+)\1/);
+    metaName = nameHit ? nameHit[2] : null;
+  }
   const report = {
     input: inputName,
     source: "muse",
     target: "claude",
-    metaName: null,
+    metaName,
     agentCallSites: calls.length,
     parallelCallSites: parallelSites.length,
     agentTypes,

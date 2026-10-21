@@ -42,7 +42,8 @@ test("default is claude->muse with stdout and stderr report", () => {
     env: { ...process.env, WFPORT_NO_UPDATE_CHECK: "1" },
   });
   assert.equal(proc.status, 2); // fixture has known gaps
-  assert.match(proc.stdout, /export default async function workflow\(host\)/);
+  assert.match(proc.stdout, /agent\(museDispatchArgs\(/);
+  assert.doesNotMatch(proc.stdout, /export default async function workflow\(host\)/);
   const parsed = JSON.parse(readFileSync(report, "utf8"));
   assert.equal(parsed.source, "claude");
   assert.equal(parsed.target, "muse");
@@ -88,7 +89,7 @@ test("legacy -o <file> still writes the file with a warning", () => {
   const out = join(dir, "flow.muse.js");
   const r = runCli([fixture, "-o", out]);
   assert.equal(r.status, 2);
-  assert.match(readFileSync(out, "utf8"), /export default async function workflow\(host\)/);
+  assert.match(readFileSync(out, "utf8"), /agent\(museDispatchArgs\(/);
   assert.match(r.stderr, /deprecated/);
 });
 
