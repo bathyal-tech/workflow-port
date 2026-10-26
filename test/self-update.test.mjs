@@ -242,8 +242,8 @@ test("prompt offers update, skip, and skip-until-next-version like codex", async
 test("update choice replaces the binary and exits for a rerun", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "wfport-update-"));
   const srv = new ReleaseServer(
-    "v0.2.0",
-    "wfport-0.2.0-binary",
+    "v9.9.9",
+    "wfport-9.9.9-binary",
     getAssetName() ?? "wfport-test-asset",
   );
   const base = await srv.start();
@@ -262,13 +262,13 @@ test("update choice replaces the binary and exits for a rerun", async (t) => {
     statePath: join(dir, "state.json"),
   });
   assert.equal(result, "updated");
-  assert.equal(readFileSync(target, "utf8"), "wfport-0.2.0-binary");
+  assert.equal(readFileSync(target, "utf8"), "wfport-9.9.9-binary");
   assert.match(out.text(), /rerun/i);
 });
 
 test("skip-until-next-version persists and silences only that version", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "wfport-update-"));
-  const srv = new ReleaseServer("v0.2.0", "wfport-0.2.0-binary", "wfport-test-asset");
+  const srv = new ReleaseServer("v9.9.9", "wfport-9.9.9-binary", "wfport-test-asset");
   const base = await srv.start();
   t.after(() => srv.stop());
   const statePath = join(dir, "state.json");
@@ -315,7 +315,7 @@ test("applyUpdate swaps the executable bytes", async (t) => {
 
 test("non-interactive runs print a notice and continue without updating", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "wfport-update-"));
-  const srv = new ReleaseServer("v0.2.0", "new-bytes", "wfport-test-asset");
+  const srv = new ReleaseServer("v9.9.9", "new-bytes", "wfport-test-asset");
   const base = await srv.start();
   t.after(() => srv.stop());
   const target = join(dir, "wfport");
@@ -335,7 +335,7 @@ test("non-interactive runs print a notice and continue without updating", async 
   assert.equal(readFileSync(target, "utf8"), "old-bytes");
   assert.match(
     out.text(),
-    new RegExp(`update available: ${VERSION.replace(/\./g, "\\.")} -> 0\\.2\\.0`),
+    new RegExp(`update available: ${VERSION.replace(/\./g, "\\.")} -> 9\\.9\\.9`),
   );
 });
 
