@@ -57,6 +57,16 @@ test("--to grok with --out writes a rhai file", () => {
   assert.match(readFileSync(out, "utf8"), /let meta = #\{/);
 });
 
+test("--out creates missing parent directories", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wfport-cli-"));
+  const out = join(dir, ".grok", "workflows", "flow.rhai");
+  const report = join(dir, "nested", "report.json");
+  const r = runCli([fixture, "--to", "grok", "--out", out, "--report", report]);
+  assert.equal(r.status, 2);
+  assert.match(readFileSync(out, "utf8"), /let meta = #\{/);
+  assert.equal(JSON.parse(readFileSync(report, "utf8")).target, "grok");
+});
+
 test("muse input without -o fails and asks for a target", () => {
   const dir = mkdtempSync(join(tmpdir(), "wfport-cli-"));
   const src = join(dir, "flow.muse.js");

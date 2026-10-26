@@ -16,6 +16,7 @@ import { emitGrok, extractFacts } from "../src/grok.mjs";
 const here = dirname(fileURLToPath(import.meta.url));
 const sample = readFileSync(join(here, "fixtures", "sample.workflow.js.txt"), "utf8");
 const toilShape = readFileSync(join(here, "fixtures", "toil-shape.workflow.js.txt"), "utf8");
+const toilRounds = readFileSync(join(here, "fixtures", "toil-rounds.workflow.js.txt"), "utf8");
 
 test("mechanical mapping: V1 body shape with bare globals", () => {
   const { code } = convert(sample, { inputName: "sample.workflow.js" });
@@ -67,12 +68,12 @@ test("grok: meta and agent calls lower to Rhai", () => {
   assert.match(code, /let meta = #\{/);
   assert.match(code, /name: "sample-sweep"/);
   assert.match(code, /when_to_use: "Fixture only\."/);
-  assert.match(code, /#\{ title: "Bootstrap" \}/);
+  assert.match(code, /#\{ title: "Bootstrap"(, detail: "[^"]*")? \}/);
   assert.match(code, /let r1 = agent\(/);
   assert.match(code, /capability_mode: "all"/); // bg-fix
   assert.match(code, /capability_mode: "read-only"/); // readonly-reviewer
   assert.match(code, /output_schema: RESULT_SCHEMA/);
-  assert.match(code, /complete\(#\{ status: "converted" \}\);/);
+  assert.match(code, /complete\(#\{[^}]*first[^}]*pair[^}]*\}\);/);
 });
 
 test("grok: interpolated prompt and parallel are flagged", () => {
@@ -228,4 +229,70 @@ test("codeOnly blanks comments and strings but keeps interpolation code", () => 
     ["spec.agentType"],
   );
   assert.deepEqual(found.literals, []);
+});
+
+test("grok: comment mentions are not call sites; prompts/structure carry over", () => {
+  const { code, facts, gaps } = emitGrok(toilRounds, {
+    inputName: "toil-rounds.workflow.js",
+    agentsDir: join(here, "fixtures", "agents"),
+  });
+  // One comment mention (`await agent()`), one helper, one parallel of two
+  // thunks, one schema const: 4 real agent() calls, 1 parallel() site.
+  assert.equal(facts.calls.length, 4);
+  assert.equal(facts.parallelSites, 1);
+  assert.equal(
+    facts.calls.filter((c) => toilRounds.split("\n")[c.line - 1].trimStart().startsWith("//"))
+      .length,
+    0,
+  );
+  // Zero agent() calls for the comment: every emitted agent( traces to a
+  // real source line, and no TODO prompt names the comment's line.
+  const commentLine = toilRounds.split("\n").findIndex((l) => l.includes("not a call site")) + 1;
+  assert.ok(commentLine > 0);
+  assert.doesNotMatch(code, new RegExp(`TODO: translate prompt \\(source line ${commentLine}\\)`));
+  // The report never points output_schema at the options object.
+  assert.ok(!gaps.some((g) => g.kind === "output_schema" && /options/.test(g.detail)));
+  assert.ok(gaps.some((g) => g.kind === "parallel"));
+  // Proxy for validate_only (no Rhai engine in this repo): the script must
+  // be self-contained Rhai — meta first, no JS-only syntax, every
+  // output_schema defined, no TODO prompts, result carried to complete().
+  assert.match(code, /^\s*(?:\/\/.*\n|\n)*let meta = #\{/);
+  assert.doesNotMatch(code, /`/);
+  assert.doesNotMatch(code, /\bawait\s/);
+  assert.doesNotMatch(code, /\basync\s/);
+  assert.doesNotMatch(code, /^\s*export\s/m);
+  assert.doesNotMatch(code, /===|!==|\?\?|\?\.|TODO: translate prompt/);
+  assert.doesNotMatch(code, /output_schema: options\b/);
+  assert.doesNotMatch(code, /museDispatchArgs\(\s*,/);
+  assert.match(code, /let REVIEW_SCHEMA = #\{/);
+  assert.match(code, /agent_type: "readonly-reviewer"/);
+  assert.match(code, /agent_type: "tl-reporter"/);
+  assert.match(code, /capability_mode: "read-only"/);
+  assert.match(code, /capability_mode: "all"/);
+  // Agent files resolve both modes from their tools lists: the reviewer
+  // (Read/Glob/Grep) verifies read-only, the reporter (Read/Write)
+  // verifies all — neither carries a placeholder gap. tl-runner has no
+  // agent file, so its heuristic mode keeps the confirm-by-hand gap.
+  const capGaps = gaps.filter((g) => g.kind === "capability_mode");
+  assert.ok(!capGaps.some((g) => g.detail.includes("readonly-reviewer")));
+  assert.ok(!capGaps.some((g) => g.detail.includes("tl-reporter")));
+  assert.ok(capGaps.some((g) => g.detail.includes("tl-runner")));
+  assert.match(code, /output_schema: REVIEW_SCHEMA/);
+  assert.match(code, /#\{ title: "Review", detail: "review axes in rounds" \}/);
+  assert.match(code, /phase\("Bootstrap"\);/);
+  assert.match(code, /phase\("Review"\);/);
+  assert.match(code, /args\.maxRounds/);
+  assert.match(code, /while round < maxRounds \{/);
+  assert.match(code, /parallel\(\[/);
+  assert.match(code, /prompt: "Review " \+ json_encode\(axis\)/);
+  assert.match(code, /label: "review:" \+ axis/);
+  assert.match(code, /fn dispatchOne\(options\) \{/);
+  assert.match(code, /complete\(#\{[^}]*report[^}]*\}\);/);
+  // Every output_schema reference resolves to a definition in the output.
+  for (const m of code.matchAll(/output_schema: ([A-Za-z_$][\w$]*)/g)) {
+    assert.ok(
+      new RegExp(`let ${m[1]} = #\\{`).test(code),
+      `output_schema ${m[1]} is not defined in the output`,
+    );
+  }
 });
