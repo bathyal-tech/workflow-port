@@ -1,0 +1,71 @@
+export const meta = {
+  name: "grok-shape",
+  description: "Reduced toil-block shape for the grok emitter",
+  whenToUse: "Fixture only.",
+  phases: [
+    { title: "Bootstrap", detail: "open a run" },
+    { title: "Review", detail: "review axes in rounds" },
+  ],
+};
+
+const REVIEW_SCHEMA = {
+  type: "object",
+  required: ["status"],
+  properties: {
+    status: { type: "string", enum: ["ok", "abort"] },
+  },
+};
+
+// `await agent()` in a comment is not a call site.
+async function dispatchOne(options) {
+  const first = await agent(options.prompt, {
+    agentType: "tl-runner",
+    phase: "Bootstrap",
+    label: options.label,
+    schema: REVIEW_SCHEMA,
+  });
+  return first;
+}
+
+phase("Bootstrap");
+const axis = "a11y";
+const topic = args.topic ?? "toil";
+const maxRounds = args.maxRounds ?? 2;
+
+const opened = await dispatchOne({
+  prompt: "Open the run.",
+  agentType: "tl-runner",
+  phase: "Bootstrap",
+  label: "open",
+  runnerType: "tl-runner",
+  schema: REVIEW_SCHEMA,
+});
+
+let round = 0;
+while (round < maxRounds) {
+  phase("Review");
+  const axes = await parallel([
+    () => agent(`Review ${axis} for ${topic}.`, {
+      agentType: "readonly-reviewer",
+      phase: "Review",
+      label: `review:${axis}`,
+      schema: REVIEW_SCHEMA,
+    }),
+    () => agent("Second check", {
+      agentType: "tl-runner",
+      phase: "Review",
+      label: "second",
+      schema: REVIEW_SCHEMA,
+    }),
+  ]);
+  round += 1;
+}
+
+const report = await agent("Write the report.", {
+  agentType: "tl-reporter",
+  phase: "Review",
+  label: "report",
+  schema: REVIEW_SCHEMA,
+});
+
+return { opened, report };

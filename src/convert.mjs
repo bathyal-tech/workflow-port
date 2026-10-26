@@ -163,9 +163,60 @@ const JS_STRING_ATOM =
   "\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|`(?:\\\\.|\\$\\{[^{}]*\\}|[^`\\\\])*`";
 
 /**
+ * When `source[slash]` is a `/` in code position, decide whether it opens
+ * a regex literal and, when it does, return the index just past its flags.
+ * The previous-significant-character heuristic separates `return /re/`
+ * from `a / b`: only an operator, opener, comma, semicolon, keyword, or
+ * start-of-input can precede a regex. Returns -1 when the slash is
+ * division, a comment, or an unterminated pattern.
+ * @param {string} source
+ * @param {number} slash
+ * @returns {number}
+ */
+export function regexLiteralEnd(source, slash) {
+  const next = source[slash + 1] ?? "";
+  if (next === "/" || next === "*" || next === "=") return -1;
+  let j = slash - 1;
+  while (j >= 0 && /\s/.test(source[j] ?? "")) j -= 1;
+  const prev = j < 0 ? "" : (source[j] ?? "");
+  const afterOpener = prev === "" || "([{,=:!&|?;".includes(prev);
+  const afterOperator = "+-~^%*<>".includes(prev);
+  let afterKeyword = false;
+  if (!afterOpener && !afterOperator && /[$\w]/.test(prev)) {
+    const m =
+      /(?:^|[^\w$])(return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield)\s*$/.exec(
+        source.slice(Math.max(0, j - 12), j + 1),
+      );
+    afterKeyword = !!m;
+  }
+  if (!afterOpener && !afterOperator && !afterKeyword) return -1;
+  let k = slash + 1;
+  let inClass = false;
+  while (k < source.length) {
+    const d = source[k];
+    if (d === "\\") {
+      k += 2;
+      continue;
+    }
+    if (d === "\n") return -1;
+    if (d === "[") inClass = true;
+    else if (d === "]") inClass = false;
+    else if (d === "/" && !inClass) {
+      k += 1;
+      while (k < source.length && /[a-z]/.test(source[k] ?? "")) k += 1;
+      return k;
+    }
+    k += 1;
+  }
+  return -1;
+}
+
+/**
  * Source with comments blanked and string/template raw text blanked
  * (delimiters, newlines, and ${...} interpolation contents kept), so
- * code scans skip comment-text and string-text mentions.
+ * code scans skip comment-text and string-text mentions. Regex literals
+ * are blanked as a unit so a quote inside `/…/` never opens a phantom
+ * string downstream.
  * @param {string} source
  * @returns {string}
  */
@@ -250,6 +301,17 @@ export function codeOnly(source) {
       state = "block";
       i += 2;
       continue;
+    }
+    if (c === "/") {
+      // A regex literal blanks as one unit; division falls through.
+      const rend = regexLiteralEnd(source, i);
+      if (rend > 0) {
+        for (let k = i; k < rend; k += 1) {
+          if (source[k] !== "\n") out[k] = " ";
+        }
+        i = rend;
+        continue;
+      }
     }
     if (c === "'") {
       state = "sq";
@@ -433,6 +495,15 @@ export function matchDelim(source, openIdx, open, close) {
       i += 2;
       continue;
     }
+    if (c === "/") {
+      // Skip a regex literal as one unit so a quote inside `/…/` never
+      // opens a phantom string; division falls through.
+      const rend = regexLiteralEnd(source, i);
+      if (rend > 0) {
+        i = rend;
+        continue;
+      }
+    }
     if (c === "'") {
       state = "sq";
       i += 1;
@@ -474,11 +545,22 @@ export function splitTopLevel(text) {
   const parts = [];
   let depth = 0;
   let start = 0;
-  let state = "code";
+  let state = "code"; // code | sq | dq | tmpl | line | block
   const tmplStack = [];
   for (let i = 0; i < text.length; i += 1) {
     const c = text[i];
     const n = text[i + 1] ?? "";
+    if (state === "line") {
+      if (c === "\n") state = "code";
+      continue;
+    }
+    if (state === "block") {
+      if (c === "*" && n === "/") {
+        state = "code";
+        i += 1;
+      }
+      continue;
+    }
     if (state === "sq" || state === "dq") {
       const q = state === "sq" ? "'" : '"';
       if (c === "\\") {
@@ -504,6 +586,33 @@ export function splitTopLevel(text) {
         i += 1;
       }
       continue;
+    }
+    if (c === "/") {
+      // Skip a regex literal so a comma or quote inside `/…/` neither
+      // splits nor opens a phantom string; division falls through.
+      const rend = regexLiteralEnd(text, i);
+      if (rend > 0) {
+        i = rend - 1;
+        continue;
+      }
+    }
+    if (c === "/" && n === "/") {
+      state = "line";
+      continue;
+    }
+    if (c === "/" && n === "*") {
+      state = "block";
+      i += 1;
+      continue;
+    }
+    if (c === "/") {
+      // A regex literal cannot hold a top-level comma — skip one so a
+      // `/,/` inside never splits the list.
+      const rend = regexLiteralEnd(text, i);
+      if (rend > 0) {
+        i = rend - 1;
+        continue;
+      }
     }
     if (c === "'") {
       state = "sq";

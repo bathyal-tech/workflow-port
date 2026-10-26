@@ -10,7 +10,7 @@
 // otherwise. Converted source goes to --out or stdout; the gap report
 // (JSON) goes to --report or stderr.
 // Exit 0 = converted; exit 1 = usage/config error; exit 2 = gaps need review.
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { VERSION } from "../src/version.mjs";
 import { maybeSelfUpdate } from "../src/self-update.mjs";
@@ -181,7 +181,10 @@ if (source === "claude" && target === "muse") {
   code = out.code;
   report = { ...out.report, source, target };
 } else if (source === "claude" && target === "grok") {
-  const grok = emitGrok(sourceText, { inputName: /** @type {string} */ (input) });
+  const grok = emitGrok(sourceText, {
+    inputName: /** @type {string} */ (input),
+    agentsDir,
+  });
   code = grok.code;
   report = {
     input,
@@ -197,6 +200,7 @@ if (source === "claude" && target === "muse") {
   const grok = emitGrokFromFacts(facts, {
     inputName: /** @type {string} */ (input),
     sourceName: "Muse Workflow",
+    agentsDir,
   });
   code = grok.code;
   report = {
@@ -243,11 +247,23 @@ if (source === "claude" && target === "muse") {
   };
 }
 
-if (outFile) writeFileSync(outFile, code);
+/**
+ * Write a file, creating missing parent directories (e.g. `.grok/workflows/`
+ * on first conversion into a project) instead of crashing with ENOENT.
+ * @param {string} file
+ * @param {string} content
+ * @returns {void}
+ */
+function writeOutputFile(file, content) {
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, content);
+}
+
+if (outFile) writeOutputFile(outFile, code);
 else process.stdout.write(code);
 
 const reportText = JSON.stringify(report, null, 2);
-if (reportFile) writeFileSync(reportFile, reportText + "\n");
+if (reportFile) writeOutputFile(reportFile, reportText + "\n");
 else console.error(reportText);
 
 process.exit(/** @type {Gap[]} */ (report.gaps).length > 0 ? 2 : 0);

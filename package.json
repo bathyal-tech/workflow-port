@@ -1,6 +1,6 @@
 {
   "name": "workflow-port",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "description": "Convert Claude Workflow scripts to Muse Workflow scripts (codemod + gap report)",
   "license": "MIT",
   "bin": {
