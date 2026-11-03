@@ -19,6 +19,7 @@ import { emitGrok, emitGrokFromFacts, extractGrokFacts } from "../src/grok.mjs";
 import { extractMuseFacts, emitMuseFromFacts } from "../src/muse.mjs";
 import { convertMuseToClaude, emitClaudeFromFacts } from "../src/claude.mjs";
 import { detectSource, resolveTarget, isDialect, DIALECTS } from "../src/route.mjs";
+import { verifyWorkflow, formatAgent, formatHuman } from "../src/verify.mjs";
 
 /**
  * @typedef {import("../src/route.mjs").Dialect} Dialect
@@ -38,12 +39,19 @@ const USAGE = `usage: wfport <input> [-i dialect] [-o dialect] [--out file] [--r
   -h, --help                 show this help
   --version                  show the version
 
+  wfport verify <input> [-i dialect] [--format agent|human|json]
+                        [--agents-dir DIR] [--strict]
+    validate a workflow file in any dialect; exits 0 when valid,
+    2 when errors are found (or warnings with --strict)
+
 Examples:
   wfport flow.js                                        # claude -> muse to stdout
   wfport flow.js --to grok --out flow.rhai
   wfport .grok/workflows/flow.rhai -o muse --out flow.muse.js
+  wfport verify flow.js --format agent                  # compact check for agents
+  wfport verify flow.rhai                               # human-readable check
 
-Exit codes: 0 clean conversion, 1 usage or config error, 2 gaps need review.
+Exit codes: 0 clean (or valid for verify), 1 usage or config error, 2 gaps/errors need review.
 Without --out the converted source goes to stdout; without --report the
 gap report JSON goes to stderr.`;
 
@@ -69,6 +77,87 @@ if (argv.includes("--version")) {
 const updateResult = await maybeSelfUpdate();
 if (updateResult === "updated") process.exit(0);
 if (updateResult === "update-failed") process.exit(1);
+
+if (argv[0] === "verify") {
+  runVerify(argv.slice(1));
+}
+
+/**
+ * Validate a workflow file in any dialect and report the result.
+ * --format agent is a compact line protocol for agents; human (default)
+ * adds source context, hints, and next steps; json emits the raw result.
+ * Exits 0 when valid, 2 on errors (or warnings with --strict), 1 on usage.
+ * @param {string[]} args
+ * @returns {never}
+ */
+function runVerify(args) {
+  /** @type {string | null} */
+  let verifyInput = null;
+  /** @type {string | null} */
+  let verifyDialectOpt = null;
+  /** @type {string} */
+  let format = "human";
+  /** @type {string | null} */
+  let verifyAgentsDir = null;
+  let strict = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "-i" || arg === "--input" || arg === "--from") {
+      const value = args[i + 1];
+      if (value == null || value.startsWith("-")) fail(`${arg} requires a value`);
+      verifyDialectOpt = /** @type {string} */ (value);
+      i += 1;
+    } else if (arg === "--format") {
+      const value = args[i + 1];
+      if (value == null || value.startsWith("-")) fail("--format requires a value");
+      format = value;
+      i += 1;
+    } else if (arg === "--agents-dir") {
+      const value = args[i + 1];
+      if (value == null || value.startsWith("-")) fail("--agents-dir requires a value");
+      verifyAgentsDir = value;
+      i += 1;
+    } else if (arg === "--strict") {
+      strict = true;
+    } else if (arg === "--no-update-check") {
+      // Handled before parsing by maybeSelfUpdate(); accepted here so it parses.
+    } else if (arg.startsWith("-")) {
+      fail(`unknown flag ${arg}\n${USAGE}`);
+    } else if (verifyInput) {
+      fail("only one input file is allowed");
+    } else {
+      verifyInput = arg;
+    }
+  }
+  if (!verifyInput) fail(`missing <input>\n${USAGE}`);
+  if (verifyDialectOpt && !isDialect(verifyDialectOpt))
+    fail(`unknown dialect "${verifyDialectOpt}" — expected one of ${DIALECTS.join("|")}`);
+  if (format !== "agent" && format !== "human" && format !== "json")
+    fail(`unknown format "${format}" — expected one of agent|human|json`);
+
+  /** @type {string} */
+  let verifyText;
+  try {
+    verifyText = readFileSync(/** @type {string} */ (verifyInput), "utf8");
+  } catch {
+    fail(`cannot read ${/** @type {string} */ (verifyInput)}`);
+    throw new Error("unreachable");
+  }
+  const inputName = /** @type {string} */ (verifyInput);
+  const dialect = detectSource(inputName, verifyText, verifyDialectOpt);
+  const agentsDir = verifyAgentsDir ?? join(dirname(inputName), "..", "agents");
+  const result = verifyWorkflow(verifyText, dialect, { agentsDir });
+
+  if (format === "json") {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else if (format === "agent") {
+    process.stdout.write(formatAgent(result, inputName));
+  } else {
+    process.stdout.write(formatHuman(result, inputName, verifyText));
+  }
+  const failed = !result.ok || (strict && result.warnings.length > 0);
+  process.exit(failed ? 2 : 0);
+}
 
 /** @type {string | null} */
 let input = null;

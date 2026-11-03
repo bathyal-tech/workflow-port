@@ -70,6 +70,36 @@ wfport .grok/workflows/flow.rhai -o muse --out flow.muse.js
 Exit 0 means a clean mechanical conversion; exit 1 is a usage or config
 error; exit 2 means gaps need review.
 
+## Verify
+
+Validate any workflow file — an input before conversion or an output after
+it — without converting:
+
+```bash
+wfport verify .claude/workflows/plan.js                  # human-readable report
+wfport verify .muse/workflows/plan.js --format agent     # compact, for agents
+wfport verify .grok/workflows/plan.rhai --format json    # raw result object
+wfport verify flow.js --strict                            # warnings fail too
+```
+
+The dialect is inferred the same way as conversion (`-i` pins it).
+`--format agent` prints one `ERROR`/`WARN` line per issue plus a `RESULT`
+summary line — concise messages, no prose. The default human format adds
+the offending source line, a hint for each issue, and next steps. `--strict`
+exits 2 on warnings as well as errors. Exit 0 means valid (or
+warnings-only without `--strict`); exit 2 means validation errors.
+
+Checks per dialect include: the right meta block (`export const meta` for
+Claude, `let meta = #{...}` for Grok; Muse takes name/description at
+launch), the correct call shapes (`agent(prompt, opts)` + thunk fan-out for
+Claude, request objects for Muse, `#{...}` option maps + `complete()` for
+Grok), Muse-only restrictions (no `export`/`host.*`, built-in `agentType`s,
+the inline-schema subset), no JS syntax in Rhai, and shared rules (no
+imports, no `Date.now`/`Math.random`, top-level return, sane fan-out).
+Converter outputs verify clean: converter fingerprints (choke-routed
+dispatches, carried meta, prebuilt job lists, thunk fan-out) are recognized
+and reported as warnings at most.
+
 ## Sources and targets
 
 The input can be any workflow dialect. `-i` / `--input` / `--from`
