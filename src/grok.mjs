@@ -3592,5 +3592,91 @@ export function extractGrokFacts(source) {
         grokParallels.some((p) => site.start > p.openIdx && site.start < p.closeIdx) || undefined,
     });
   }
+  // Parallel job maps dispatch agents without an agent() call, so extract
+  // them as calls too: parallel([#{ prompt, ... }, ...]) inline lists and
+  // <var>.push(#{ ... }) builds consumed by parallel(<var>).
+  /**
+   * Parse one #{ ... } job map at the given source index into a call fact.
+   * @param {string} mapSrc source slice starting at the # of the map
+   * @param {number} at absolute index of the map in the source
+   * @returns {void}
+   */
+  const pushJobMap = (mapSrc, at) => {
+    const oOpen = mapSrc.indexOf("{");
+    const oClose = matchDelim(mapSrc, oOpen, "{", "}");
+    const innerBody = oClose > 0 ? mapSrc.slice(oOpen + 1, oClose) : mapSrc.slice(oOpen + 1);
+    // Fields come from top-level `key: value` parts only, so text inside
+    // the prompt string can never masquerade as another field.
+    /** @type {Map<string, string>} */
+    const fields = new Map();
+    for (const part of splitTopLevel(innerBody)) {
+      const km = /^\s*([A-Za-z_$][\w$]*)\s*:\s*([\s\S]*?)\s*$/.exec(part);
+      if (km) fields.set(km[1], km[2]);
+    }
+    const promptSrc = fields.get("prompt") ?? null;
+    if (!promptSrc) return;
+    /**
+     * Read a string field from its own value part only.
+     * @param {string} name
+     * @returns {string | null}
+     */
+    const strField = (name) => {
+      const value = fields.get(name);
+      return value ? rhaiField(`${name}: ${value}`, name) : null;
+    };
+    const schemaSrc = fields.get("output_schema") ?? null;
+    const schemaIdent = schemaSrc ? /^([A-Za-z_$][\w$]*)$/.exec(schemaSrc.trim()) : null;
+    facts.calls.push({
+      line: lineOf(source, at),
+      start: at,
+      promptSrc,
+      agentType: strField("agent_type"),
+      label: strField("label"),
+      phase: strField("phase"),
+      model: strField("model"),
+      schema: schemaIdent ? schemaIdent[1] : null,
+      schemaInline: schemaSrc && !schemaIdent ? true : undefined,
+      capability: strField("capability_mode"),
+      inParallel: true,
+    });
+  };
+  for (const site of grokParallels) {
+    const inner = source.slice(site.openIdx + 1, site.closeIdx).trim();
+    if (inner.startsWith("[")) {
+      // Scan the masked source so commented-out maps and #{ inside
+      // strings never match, and each duplicate keeps its own position.
+      let coveredUntil = -1;
+      for (
+        let at = masked.indexOf("#{", site.openIdx);
+        at >= 0 && at < site.closeIdx;
+        at = masked.indexOf("#{", at + 1)
+      ) {
+        if (at < coveredUntil) continue;
+        const oClose = matchDelim(source, at + 1, "{", "}");
+        if (oClose < 0 || oClose > site.closeIdx) continue;
+        coveredUntil = oClose + 1;
+        pushJobMap(source.slice(at, oClose + 1), at);
+      }
+    } else if (/^[A-Za-z_$][\w$]*$/.test(inner)) {
+      // Only pushes after the list's last assignment belong to it; the
+      // boundary keeps lookalike identifiers (myjobs) out, and scanning
+      // the mask keeps commented pushes out.
+      const assignRe = new RegExp(`(?<![\\w$.])${inner}\\s*=(?!=)`, "g");
+      let lastAssign = -1;
+      let am2;
+      const beforeMasked = masked.slice(0, site.start);
+      while ((am2 = assignRe.exec(beforeMasked)) !== null) lastAssign = am2.index;
+      const pushRe = new RegExp(`(?<![\\w$.])${inner}\\.push\\s*\\(\\s*#\\{`, "g");
+      let pm;
+      while ((pm = pushRe.exec(beforeMasked)) !== null) {
+        if (pm.index < lastAssign) continue;
+        const hashIdx = masked.indexOf("#{", pm.index);
+        const oClose = matchDelim(source, hashIdx + 1, "{", "}");
+        if (oClose < 0) continue;
+        pushJobMap(source.slice(hashIdx, oClose + 1), hashIdx);
+      }
+    }
+  }
+  facts.calls.sort((a, b) => (a.start ?? 0) - (b.start ?? 0));
   return facts;
 }

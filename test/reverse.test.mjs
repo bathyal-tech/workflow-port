@@ -127,6 +127,81 @@ test("muse body->claude: choke unwrapped, shims stripped, meta restored", () => 
   assert.ok(report.gaps.some((g) => g.kind === "agentType"));
 });
 
+test("grok facts: inline parallel job maps are calls", () => {
+  const src = [
+    'let meta = #{ name: "s", description: "d", when_to_use: "w", phases: [#{ title: "Review" }] };',
+    'let a = agent("First", #{ label: "first" });',
+    'let pair = parallel([#{ prompt: "A", label: "a", capability_mode: "read-only" }, #{ prompt: "B", label: "b" }]);',
+    "complete(#{ a: a, pair: pair });",
+    "",
+  ].join("\n");
+  const facts = extractGrokFacts(src);
+  assert.equal(facts.calls.length, 3);
+  assert.equal(facts.calls.filter((c) => c.inParallel).length, 2);
+  assert.equal(facts.calls[1].label, "a");
+  assert.equal(facts.calls[1].capability, "read-only");
+});
+
+test("grok facts: commented and duplicate inline job maps survive", () => {
+  const src = [
+    'let meta = #{ name: "s", description: "d", when_to_use: "w", phases: [] };',
+    "let pair = parallel([",
+    "  // correctness axis",
+    '  #{ prompt: "A", label: "a" }, // trailing note',
+    '  /* tests axis */ #{ prompt: "A", label: "a" },',
+    "]);",
+    "complete(#{ pair: pair });",
+    "",
+  ].join("\n");
+  const facts = extractGrokFacts(src);
+  assert.equal(facts.calls.length, 2);
+  assert.notEqual(facts.calls[0].start, facts.calls[1].start);
+});
+
+test("grok facts: push builds ignore comments, lookalikes, and resets", () => {
+  const src = [
+    'let meta = #{ name: "s", description: "d", when_to_use: "w", phases: [] };',
+    "let jobs = [];",
+    'jobs.push(#{ prompt: "stale", label: "stale" });',
+    "jobs = [];",
+    'myjobs.push(#{ prompt: "nope", label: "nope" });',
+    '// jobs.push(#{ prompt: "ghost", label: "ghost" });',
+    'jobs.push(#{ prompt: "real", label: "real" });',
+    "let pair = parallel(jobs);",
+    "complete(#{ pair: pair });",
+    "",
+  ].join("\n");
+  const facts = extractGrokFacts(src);
+  assert.deepEqual(
+    facts.calls.map((c) => c.label),
+    ["real"],
+  );
+});
+
+test("grok facts: job-map fields are not read from the prompt string", () => {
+  const src = [
+    'let meta = #{ name: "s", description: "d", when_to_use: "w", phases: [] };',
+    'let pair = parallel([#{ prompt: "set output_schema: Foo before running", output_schema: RESULT_SCHEMA, label: "real" }, #{ prompt: "hello label: ", label: "second" }]);',
+    "complete(#{ pair: pair });",
+    "",
+  ].join("\n");
+  const facts = extractGrokFacts(src);
+  assert.equal(facts.calls[0].schema, "RESULT_SCHEMA");
+  assert.equal(facts.calls[0].label, "real");
+  assert.equal(facts.calls[1].label, "second");
+});
+
+test("muse body->claude: bare request objects are lowered", () => {
+  const src = [
+    'const first = await agent({ input: "Do it", agentType: "general-purpose", label: "first" });',
+    'return { status: "ok", ref: first, text: "done" };',
+    "",
+  ].join("\n");
+  const { code } = convertMuseToClaude(src, { inputName: "body.muse.js" });
+  assert.match(code, /agent\("Do it", \{ agentType: "general-purpose", label: "first" \}\)/);
+  assert.doesNotMatch(code, /agent\(\{ input:/);
+});
+
 test("muse body facts: choke-routed calls recover prompt and options", () => {
   const { code } = convert(
     'const r = await agent("Do it", { agentType: "bg-fix" });\nreturn r;\n',
