@@ -9,6 +9,7 @@
   "type": "module",
   "scripts": {
     "test": "bun test",
+    "eval": "bun test/eval/run.mjs",
     "typecheck": "tsgo --noEmit",
     "lint": "oxlint",
     "format": "oxfmt",

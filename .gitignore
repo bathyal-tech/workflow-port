@@ -1,4 +1,7 @@
 node_modules/
 dist/
 *.muse.js
+!test/eval/seeds/seed.muse.js
+!test/eval/harness/harness.muse.js
 report.json
+test/eval/out/

@@ -26,6 +26,13 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: bun run verify
+      - name: Verify eval seeds and harnesses (syntactic only, no LLM runs)
+        env:
+          WFPORT_NO_UPDATE_CHECK: "1"
+        run: |
+          for f in test/eval/seeds/seed.claude.js test/eval/seeds/seed.muse.js test/eval/seeds/seed.grok.rhai test/eval/harness/harness.claude.js test/eval/harness/harness.muse.js test/eval/harness/harness.grok.rhai; do
+            bun bin/cli.mjs verify "$f" --format agent
+          done
 
   smoke:
     needs: verify

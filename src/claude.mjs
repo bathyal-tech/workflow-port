@@ -212,8 +212,13 @@ export function convertMuseToClaude(source, { inputName = "<input>", agentsDir =
         `${choke.rest ? `, { ${choke.rest} }` : ""})${code.slice(end)}`;
       continue;
     }
-    if (!call.isHost) continue; // already a Claude-shape bare call
-    // host.agent takes a single request object, not (prompt, opts).
+    // Bare V1-body calls agent({ input, ... }) lower the same way
+    // host.agent ones do; bare (prompt, opts) calls are Claude shape.
+    if (!call.isHost) {
+      const bareArgs = splitTopLevel(inner);
+      if (bareArgs.length !== 1 || !splitRequestObject(bareArgs[0] ?? "")) continue;
+    }
+    // Muse takes a single request object, not (prompt, opts).
     const args = splitTopLevel(inner);
     const first = args[0] ?? "";
     if (args.length > 1) {

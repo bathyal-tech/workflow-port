@@ -64,7 +64,7 @@ export const MUSE_AGENT_TYPES = new Set(["general-purpose", "workflow-subagent"]
 export const SCHEMA_KEYWORDS_OK = new Set(["type", "enum", "required", "properties", "items"]);
 // NOTE: "description" and "title" are checked separately (string-valued only):
 // `title: { type: "string" }` is a data field name, not a schema keyword.
-const SCHEMA_KEYWORDS_BAD = [
+export const SCHEMA_KEYWORDS_BAD = [
   "additionalProperties",
   "$ref",
   "anyOf",
