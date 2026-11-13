@@ -383,12 +383,15 @@ export function verifyClaude(source, { agentsDir = null } = {}) {
     const arrOpen = inner.indexOf("[");
     const arrClose = arrOpen >= 0 ? matchDelim(inner, arrOpen, "[", "]") : -1;
     if (arrOpen < 0 || arrClose < 0) {
-      errors.push({
-        severity: "error",
-        code: "E_PARALLEL_SHAPE",
+      // A dynamically built list (specs.map(...), a prebuilt variable)
+      // is idiomatic and runs fine — the entries just cannot be
+      // checked statically, so this warns like the Grok job list does.
+      warnings.push({
+        severity: "warning",
+        code: "W_PARALLEL_DYNAMIC",
         line: site.line,
-        message: "parallel() argument is not an array literal",
-        hint: "Rebuild as parallel([() => agent(...), ...]).",
+        message: "parallel() argument is built dynamically — entries are not statically checked",
+        hint: "Confirm every entry is a () => agent(...) thunk.",
       });
       continue;
     }
@@ -615,12 +618,15 @@ export function verifyMuse(source, { agentsDir = null } = {}) {
   for (const site of parallels.sites) {
     const inner = source.slice(site.openIdx + 1, site.closeIdx).trim();
     if (!inner.startsWith("[")) {
-      errors.push({
-        severity: "error",
-        code: "E_PARALLEL_SHAPE",
+      // A dynamically built list (specs.map(...), a prebuilt variable)
+      // is idiomatic and runs fine — the entries just cannot be
+      // checked statically, so this warns like the Grok job list does.
+      warnings.push({
+        severity: "warning",
+        code: "W_PARALLEL_DYNAMIC",
         line: site.line,
-        message: "parallel() argument is not an array literal",
-        hint: "Rebuild as parallel([{ input, ... }, ...]).",
+        message: "parallel() argument is built dynamically — entries are not statically checked",
+        hint: "Confirm every entry is a request object or a () => agent(...) thunk.",
       });
       continue;
     }

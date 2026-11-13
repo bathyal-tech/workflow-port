@@ -204,13 +204,48 @@ test("stripSchemaProps keeps field names and runtime notes", () => {
       "}",
     ].join("\n"),
   );
-  assert.deepEqual(removed, { description: 1, title: 0, notes: 1 });
+  assert.deepEqual(removed, { description: 1, title: 0, notes: 1, constraints: 0 });
   assert.match(text, /title: \{ type: "string" \}/);
   assert.match(text, /note: \{ type: "string" \}/);
   assert.doesNotMatch(text, /notes: \{ type/);
   assert.doesNotMatch(text, /description/);
   const kept = stripSchemaProps('`x`; const r = { notes: value ? "a" : "b" };');
-  assert.deepEqual(kept.removed, { description: 0, title: 0, notes: 0 });
+  assert.deepEqual(kept.removed, { description: 0, title: 0, notes: 0, constraints: 0 });
+});
+
+test("stripSchemaProps removes rejected constraint keys but keeps keyword-named fields", () => {
+  const { text, removed } = stripSchemaProps(
+    [
+      "{",
+      '  type: "object",',
+      "  properties: {",
+      '    issue: { type: "integer", minimum: 1 },',
+      '    pattern: { type: "string" },',
+      '    choice: { type: "string", anyOf: [{ type: "string" }, { type: "number" }], format: "slug" },',
+      "  },",
+      "  additionalProperties: false,",
+      "}",
+    ].join("\n"),
+  );
+  // minimum, anyOf, format, additionalProperties go; the field named
+  // `pattern` stays because its value is a schema object, not a pattern.
+  assert.equal(removed.constraints, 4);
+  assert.doesNotMatch(text, /minimum|anyOf|format:|additionalProperties/);
+  assert.match(text, /issue: \{ type: "integer"\s*\}/);
+  assert.match(text, /pattern: \{ type: "string" \}/);
+});
+
+test("convert strips rejected schema constraints and reports them clean", () => {
+  const src = [
+    "export const meta = { name: 's', description: 'd', whenToUse: 'w', phases: [] };",
+    "const RESULT_SCHEMA = { type: 'object', properties: { issue: { type: 'integer', minimum: 1 } } };",
+    "const r = await agent('hi', { label: 'x', schema: RESULT_SCHEMA });",
+    "return { r };",
+  ].join("\n");
+  const { code, report } = convert(src, { inputName: "min.js" });
+  assert.doesNotMatch(code, /minimum/);
+  assert.deepEqual(report.schemas[0]?.issues, []);
+  assert.ok(report.gaps.some((g) => g.kind === "schema" && /rejected constraint/.test(g.detail)));
 });
 
 test("codeOnly blanks comments and strings but keeps interpolation code", () => {

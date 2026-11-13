@@ -160,8 +160,10 @@ counterpart to derive from.
 ## What the report flags
 
 Custom `agentType`s (Muse only knows `general-purpose` / `workflow-subagent` —
-inline the `.claude/agents/<name>.md` prompt by hand); schemas using keys Muse
-inline schemas reject (`description`, `anyOf`, `$ref`, …) or over 4 KiB; dynamic
+inline the `.claude/agents/<name>.md` prompt by hand); schema keys Muse inline
+schemas reject (`description`, `title`, `notes`, and constraint keys such as
+`minimum`, `anyOf`, `$ref`, …) are stripped from schema consts and reported;
+schemas over 4 KiB; dynamic
 option objects; `Date.now` / `Math.random`; fan-out beyond ~15 children; missing
 terminal `return { status, ref, text }`. The `--agents-dir` option (default:
 sibling `../agents`) checks whether each custom type's agent file exists.
