@@ -345,16 +345,121 @@ export function codeOnly(source) {
 }
 
 /**
+ * Remove Muse-rejected constraint keys (minimum, anyOf, format, ...)
+ * at any depth of a schema literal. Values go whole — balanced, so a
+ * nested `anyOf: [{...}, {...}]` never leaves a stump. A rejected name
+ * used as a field name inside `properties:` (`pattern: { type:
+ * "string" }`) is a field definition, not a constraint, and is kept.
+ * Matches are located on the codeOnly mask so string and comment text
+ * that merely mentions a key is never touched.
+ * @param {string} text
+ * @returns {{ text: string, removed: number }}
+ */
+function removeRejectedSchemaKeys(text) {
+  const masked = codeOnly(text);
+  /** @type {{ start: number, end: number }[]} */
+  const spans = [];
+  /** @type {{ fields: boolean, lastKey: string | null }[]} */
+  const stack = [];
+  const keyRe = /"?([A-Za-z_$][\w$]*|\$ref)"?\s*:/y;
+  /** @param {number} from @returns {number} index just past the value at `from` */
+  const valueEnd = (from) => {
+    const ch = masked[from] ?? "";
+    if (ch === "{") return matchDelim(text, from, "{", "}") + 1;
+    if (ch === "[") return matchDelim(text, from, "[", "]") + 1;
+    if (ch === '"' || ch === "'" || ch === "`") {
+      let j = from + 1;
+      while (j < text.length) {
+        if (text[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (text[j] === ch) return j + 1;
+        j += 1;
+      }
+      return j;
+    }
+    let depth = 0;
+    let j = from;
+    while (j < masked.length) {
+      const d = masked[j] ?? "";
+      if (d === "(" || d === "[" || d === "{") depth += 1;
+      else if (d === ")" || d === "]" || d === "}") {
+        if (depth === 0) return j;
+        depth -= 1;
+      } else if (d === "," && depth === 0) return j;
+      j += 1;
+    }
+    return j;
+  };
+  let i = 0;
+  while (i < masked.length) {
+    const c = masked[i] ?? "";
+    if (c === "{") {
+      const parent = stack[stack.length - 1];
+      stack.push({ fields: parent?.lastKey === "properties", lastKey: null });
+      i += 1;
+      continue;
+    }
+    if (c === "}") {
+      stack.pop();
+      i += 1;
+      continue;
+    }
+    const frame = stack[stack.length - 1];
+    if (!frame || !/[A-Za-z$"]/.test(c)) {
+      i += 1;
+      continue;
+    }
+    let p = i - 1;
+    while (p >= 0 && /\s/.test(masked[p] ?? "")) p -= 1;
+    if (p >= 0 && masked[p] !== "{" && masked[p] !== ",") {
+      i += 1;
+      continue;
+    }
+    keyRe.lastIndex = i;
+    const km = keyRe.exec(masked);
+    if (!km) {
+      i += 1;
+      continue;
+    }
+    const key = km[1] ?? "";
+    frame.lastKey = key;
+    let vs = i + km[0].length;
+    while (vs < masked.length && /\s/.test(masked[vs] ?? "")) vs += 1;
+    if (!SCHEMA_KEYWORDS_BAD.includes(key) || (frame.fields && masked[vs] === "{")) {
+      i = vs;
+      continue;
+    }
+    const ve = valueEnd(vs);
+    let start = i;
+    let end = ve;
+    let j = end;
+    while (j < masked.length && /\s/.test(masked[j] ?? "")) j += 1;
+    if (masked[j] === ",") end = j + 1;
+    else if (p >= 0 && masked[p] === ",") start = p;
+    spans.push({ start, end });
+    i = ve;
+  }
+  let out = text;
+  for (let s = spans.length - 1; s >= 0; s -= 1) {
+    const span = /** @type {{ start: number, end: number }} */ (spans[s]);
+    out = out.slice(0, span.start) + out.slice(span.end);
+  }
+  return { text: out, removed: spans.length };
+}
+
+/**
  * Remove Muse-rejected keys from one schema-like object literal:
  * string-valued `description`/`title` keys and object-valued `notes` keys.
  * Property-name shapes (`title: { type: "string" }`) and runtime
  * `notes: <expr>` are kept.
  * @param {string} literal
- * @returns {{ text: string, removed: { description: number, title: number, notes: number } }}
+ * @returns {{ text: string, removed: { description: number, title: number, notes: number, constraints: number } }}
  */
 export function stripSchemaProps(literal) {
-  /** @type {{ description: number, title: number, notes: number }} */
-  const removed = { description: 0, title: 0, notes: 0 };
+  /** @type {{ description: number, title: number, notes: number, constraints: number }} */
+  const removed = { description: 0, title: 0, notes: 0, constraints: 0 };
   let text = literal;
   const strVal = `(?:${JS_STRING_ATOM})(?:\\s*\\+\\s*(?:${JS_STRING_ATOM}))*`;
   const descRe = new RegExp(`([,{]\\s*)description\\s*:\\s*${strVal}\\s*,?`, "g");
@@ -372,6 +477,9 @@ export function stripSchemaProps(literal) {
     removed.notes += 1;
     return prefix;
   });
+  const rejected = removeRejectedSchemaKeys(text);
+  text = rejected.text;
+  removed.constraints = rejected.removed;
   return { text, removed };
 }
 
@@ -720,7 +828,7 @@ function stripSchemas(code, gaps) {
     const c = consts[i];
     const literal = code.slice(c.openIdx, c.closeIdx + 1);
     const { text, removed } = stripSchemaProps(literal);
-    const total = removed.description + removed.title + removed.notes;
+    const total = removed.description + removed.title + removed.notes + removed.constraints;
     if (total === 0) continue;
     code = code.slice(0, c.openIdx) + text + code.slice(c.closeIdx + 1);
     /** @type {string[]} */
@@ -728,6 +836,7 @@ function stripSchemas(code, gaps) {
     if (removed.description) parts.push(`${removed.description} description`);
     if (removed.title) parts.push(`${removed.title} title`);
     if (removed.notes) parts.push(`${removed.notes} notes`);
+    if (removed.constraints) parts.push(`${removed.constraints} rejected constraint`);
     gaps.push({
       kind: "schema",
       line: lineOf(code, c.openIdx),

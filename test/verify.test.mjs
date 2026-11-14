@@ -191,6 +191,26 @@ return { status: "ok", ref: r, text: "done" };
   assert.ok(result.warnings.some((w) => w.code === "W_PARALLEL_THUNK"));
 });
 
+test("muse: dynamic parallel() argument warns instead of failing", () => {
+  const src = `const p = await parallel(specs.map((s) => () => agent({ input: s.prompt })));
+return { status: "ok", ref: null, text: "done" };
+`;
+  const result = verifyMuse(src);
+  assert.equal(result.ok, true);
+  assert.ok(!result.errors.some((e) => e.code === "E_PARALLEL_SHAPE"));
+  assert.ok(result.warnings.some((w) => w.code === "W_PARALLEL_DYNAMIC"));
+});
+
+test("claude: dynamic parallel() argument warns instead of failing", () => {
+  const src = `export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };
+const p = await parallel(specs.map((s) => () => agent(s.prompt)));
+return { status: "ok" };
+`;
+  const result = verifyClaude(src);
+  assert.ok(!result.errors.some((e) => e.code === "E_PARALLEL_SHAPE"));
+  assert.ok(result.warnings.some((w) => w.code === "W_PARALLEL_DYNAMIC"));
+});
+
 test("grok: missing meta and missing complete are errors", () => {
   const result = verifyGrok(`let r1 = agent("Do it", #{ label: "one" });\n`);
   assert.equal(result.ok, false);
