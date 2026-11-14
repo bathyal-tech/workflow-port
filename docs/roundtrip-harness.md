@@ -226,6 +226,31 @@ only on a separate go-ahead.
   agent copies under `test/eval/out/agents/` (missing the
   `Edit` tool added to `test/eval/agents/`) as immaterial
   to that candidate.
+- Live Muse runtime smokes (2026-11-06, in-session
+  `muse.workflow` launches by `scriptPath`, `args`
+  `{ topic: "the workflow-port repository", fix: false }`):
+  the canonical Muse seed and both Muse candidates
+  (claude→muse, grok→muse) each **completed live** —
+  bootstrap `ok`, both reviews returned, fix `"skipped"`,
+  no preflight or runtime rejection. This is the first
+  execution-level proof for the Muse dialect: before it,
+  Muse legs were only ever verified statically and judged,
+  never run. A Muse leg’s golden bar is therefore:
+  `wfport verify` clean **and** a completed live launch
+  with the seed’s terminal shape.
+- Muse host run (`run-2026-11-13T06-38-23.json`, Muse Code
+  1.4.18, ~7m wall): **6/6 legs pass, all six hard gates
+  pass, all four judge axes pass on every leg** — the Muse
+  host’s first clean sweep (was 5/6, then 3/6 on judge
+  variance). The regenerated Muse candidates were
+  re-verified independently (0 errors) and live-launched
+  again in-session: both completed with the seed’s terminal
+  shape. All three hosts have now posted a 6/6 run (Grok
+  2026-11-04, Claude 2026-11-06, Muse 2026-11-13). One
+  audit note: the launcher recorded `resolvedModel:
+  "grok-12"` for the Muse host, extracted from the host log —
+  the model label on Muse-host runs is unreliable and
+  verdicts should be read as host-level, not model-level.
 
 Residual follow-ups (not chased in a 3rd loop):
 
