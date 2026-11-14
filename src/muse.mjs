@@ -187,7 +187,14 @@ export function emitMuseFromFacts(
       gaps.push({
         kind: "capability",
         line: call.line,
-        detail: `capability_mode "${call.capability}" has no Muse equivalent — scope the call down by hand`,
+        detail: `capability_mode "${call.capability}" has no Muse equivalent — a general-purpose child is not tool-restricted, so a read-only scope would be prompt-only and NOT enforced; enforce it Muse-side or isolate the leg before running`,
+      });
+    }
+    for (const m of call.promptSrc.matchAll(/mcp__[A-Za-z0-9_-]+/g)) {
+      gaps.push({
+        kind: "mcp-tool",
+        line: call.line,
+        detail: `${m[0]} — Muse children have no MCP tools, so this order cannot run as written; replace it with a Muse-side route or document an explicit skip`,
       });
     }
     if (call.schema) {

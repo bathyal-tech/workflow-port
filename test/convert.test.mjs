@@ -177,6 +177,49 @@ test("toil-shape: fragments, notes, titles, dynamic types, model pin, mcp", () =
   for (const s of report.schemas) assert.deepEqual(s.issues, []);
 });
 
+test("read-only agent file tools are a blocking tool-restriction gap for muse", () => {
+  const { report } = convert(sample, {
+    inputName: "sample.workflow.js",
+    agentsDir: join(here, "fixtures", "agents"),
+  });
+  const gap = report.gaps.find((g) => g.kind === "tool-restriction");
+  assert.ok(gap, "expected a tool-restriction gap");
+  assert.match(gap.detail, /readonly-reviewer/);
+  assert.match(gap.detail, /Read, Glob, Grep/);
+  assert.match(gap.detail, /prompt-only|NOT enforced/);
+  const entry = report.agentTypes.find((a) => a.value === "readonly-reviewer");
+  assert.deepEqual(entry?.tools, ["Read", "Glob", "Grep"]);
+  // A write-capable agent file (Read, Write) is not a read-only restriction.
+  const { report: rep2 } = convert(toilRounds, {
+    inputName: "toil-rounds.workflow.js",
+    agentsDir: join(here, "fixtures", "agents"),
+  });
+  assert.ok(!rep2.gaps.some((g) => g.kind === "tool-restriction" && /tl-reporter/.test(g.detail)));
+});
+
+test("mcp__ tool orders in prompts are flagged for muse children", () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const r = await agent("Request review with mcp__github__add_issue_comment, then collect it.", { label: "codex-request" });',
+    "return { r };",
+  ].join("\n");
+  const { report } = convert(src, { inputName: "mcp.js" });
+  const gap = report.gaps.find((g) => g.kind === "mcp-tool");
+  assert.ok(gap, "expected an mcp-tool gap");
+  assert.match(gap.detail, /mcp__github__add_issue_comment/);
+  assert.match(gap.detail, /no MCP tools/);
+});
+
+test("codex-review fallback path is flagged even without tl-runner", () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const r = await agent("Fall back to scripts/codex-review.ts when the mention fails.", { label: "codex-request" });',
+    "return { r };",
+  ].join("\n");
+  const { report } = convert(src, { inputName: "codex-fallback.js" });
+  assert.ok(report.gaps.some((g) => g.kind === "codex-mcp"));
+});
+
 test("banned APIs count only in code, with real lines", () => {
   const src = [
     "// no `Date.now()` here — comment only",

@@ -21,7 +21,7 @@
 //   general-purpose and reported; the agent file's prompt must be inlined
 //   by hand (semantic port) before the output is runnable.
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -47,6 +47,7 @@ import { join } from "node:path";
  * @property {string} muse
  * @property {string | null} agentFile
  * @property {boolean | null} agentFileExists
+ * @property {string[] | null} tools
  * @property {string} action
  *
  * @typedef {object} ConvertReport
@@ -100,6 +101,68 @@ export const MUSE_KNOWN_ROLES = {
   "readonly-reviewer":
     "You are a read-only reviewer. Read the diff and surrounding code, then report findings. Edit nothing and run no commands.",
 };
+
+/**
+ * Role prompt for a custom agent type: a known short prompt, else a generic
+ * mechanical-runner prompt carrying the type name.
+ * @param {string} name
+ * @returns {string}
+ */
+/**
+ * Tools that provably only read (never modify the tree, run commands, or
+ * spawn subagents). An agent file whose `tools:` frontmatter lists only
+ * these is read-only; anything else (Write, Edit, Bash, Task, unknown)
+ * keeps the permissive "all" mode.
+ */
+export const AGENT_READ_TOOLS = new Set([
+  "read",
+  "glob",
+  "grep",
+  "ls",
+  "notebookread",
+  "webfetch",
+  "websearch",
+]);
+
+/**
+ * Read the `tools:` frontmatter list from an agent file
+ * (`<agentsDir>/<agentType>.md`). Returns null when the file is missing,
+ * unreadable, or names no tools.
+ * @param {string | null | undefined} agentsDir
+ * @param {string} agentType
+ * @returns {string[] | null}
+ */
+export function readAgentTools(agentsDir, agentType) {
+  if (!agentsDir) return null;
+  const file = join(agentsDir, `${agentType}.md`);
+  if (!existsSync(file)) return null;
+  let text;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  const fm = /^---\s*\n([\s\S]*?)\n---/.exec(text);
+  if (!fm) return null;
+  const line = fm[1].split("\n").find((l) => /^\s*tools\s*:/i.test(l));
+  if (!line) return null;
+  const tools = line
+    .slice(line.indexOf(":") + 1)
+    .split(/[,\s]+/)
+    .map((t) => t.trim().replace(/^["']|["']$/g, ""))
+    .filter(Boolean);
+  return tools.length ? tools : null;
+}
+
+/**
+ * True when a tools list grants only read tools — a physical restriction
+ * in Claude (the agent file) that no Muse prompt can reproduce.
+ * @param {string[] | null} tools
+ * @returns {boolean}
+ */
+export function isReadOnlyTools(tools) {
+  return !!tools && tools.length > 0 && tools.every((t) => AGENT_READ_TOOLS.has(t.toLowerCase()));
+}
 
 /**
  * Role prompt for a custom agent type: a known short prompt, else a generic
@@ -967,6 +1030,23 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
       line: l.line,
       detail: `${l.value} — mapped to general-purpose via museDispatchArgs; refine the role prompt by inlining .claude/agents/${l.value}.md`,
     });
+    // A read-only tools list in the agent file is a physical restriction
+    // in Claude; Muse general-purpose children get full tools, so the
+    // inlined "edit nothing" role prompt is prompt-only and NOT enforced.
+    const tools = readAgentTools(agentsDir, l.value);
+    if (isReadOnlyTools(tools)) {
+      gaps.push({
+        kind: "tool-restriction",
+        line: l.line,
+        detail:
+          `${l.value}: agent file limits tools to ${(tools ?? []).join(", ")} — Muse ` +
+          `general-purpose has no tool restriction, so this becomes prompt-only and NOT enforced ` +
+          `(the child can still edit, commit, and push). Do not run read-only gates through this ` +
+          `port: enforce it Muse-side (a per-call tools allowlist), or isolate the review leg ` +
+          `in a disposable worktree without push credentials and abort if the tree or HEAD ` +
+          `changes, or keep that leg on a host that enforces capability.`,
+      });
+    }
   }
   for (const d of found.dynamics) {
     gaps.push({
@@ -975,14 +1055,19 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
       detail: `dynamic agentType ${d.expr} — mapped at runtime via museDispatchArgs; verify the role prompt covers its values`,
     });
   }
-  const agentTypeReport = customTypes.map((value) => ({
-    value,
-    muse: "general-purpose",
-    agentFile: agentsDir ? join(agentsDir, `${value}.md`) : null,
-    agentFileExists: agentsDir ? existsSync(join(agentsDir, `${value}.md`)) : null,
-    action:
-      "mapped to general-purpose via museDispatchArgs with a short role prompt — refine by inlining the agent file's prompt",
-  }));
+  const agentTypeReport = customTypes.map((value) => {
+    const tools = readAgentTools(agentsDir, value);
+    return {
+      value,
+      muse: "general-purpose",
+      agentFile: agentsDir ? join(agentsDir, `${value}.md`) : null,
+      agentFileExists: agentsDir ? existsSync(join(agentsDir, `${value}.md`)) : null,
+      tools,
+      action: isReadOnlyTools(tools)
+        ? "mapped to general-purpose via museDispatchArgs with a short role prompt — WARNING: the agent file's read-only tools restriction is lost (prompt-only, not enforced); see the tool-restriction gap"
+        : "mapped to general-purpose via museDispatchArgs with a short role prompt — refine by inlining the agent file's prompt",
+    };
+  });
 
   // Every dispatch already routes through the choke points (mapping +
   // unwrap) — convertAgentCall emits that form directly.
@@ -997,14 +1082,44 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
     });
   }
 
-  // Codex-review degradation: the tl-runner MCP mention path has no Muse
-  // equivalent — a documented skip, not a silent mapping.
-  if (customTypes.includes("tl-runner") && /@codex|\bMCP\b/i.test(source)) {
+  // MCP tool orders inside prompts: Muse children have no MCP tools, so
+  // an instruction like "post with mcp__github__add_issue_comment" cannot
+  // run as written. Prompt text lives in string literals, so scan the raw
+  // source (codeOnly would blank it); comment-only lines are not orders.
+  /** @type {{ tool: string, line: number }[]} */
+  const mcpOrders = [];
+  source.split("\n").forEach((text, i) => {
+    if (/^\s*(\/\/|\*)/.test(text)) return;
+    for (const m of text.matchAll(/mcp__[A-Za-z0-9_-]+/g)) {
+      mcpOrders.push({ tool: m[0], line: i + 1 });
+    }
+  });
+  for (const order of mcpOrders) {
+    gaps.push({
+      kind: "mcp-tool",
+      line: order.line,
+      detail:
+        `${order.tool} — Muse children have no MCP tools, so this order cannot run as ` +
+        `written and the step it drives will silently never happen. Replace it with a ` +
+        `Muse-side posting/collection route, or document an explicit skip before running.`,
+    });
+  }
+
+  // Codex-review degradation: the @codex mention path (GitHub MCP write,
+  // or the scripts/codex-review.ts fallback outside the child) has no Muse
+  // equivalent — a documented skip, not a silent mapping. The fallback
+  // posts outside the child, may post as a different account, and its
+  // result may not be collected as a reviewable review.
+  if (
+    (customTypes.includes("tl-runner") && /@codex|\bMCP\b/i.test(source)) ||
+    /codex-review(\.ts)?\b/i.test(source) ||
+    (/@codex\b/i.test(source) && mcpOrders.length > 0)
+  ) {
     gaps.push({
       kind: "codex-mcp",
       line: 1,
       detail:
-        "tl-runner posts the @codex mention via the GitHub MCP write path, which Muse children lack — document a skip or a Muse-side posting route (gh api writes as the wrong account)",
+        "codex review round: the @codex mention rides the GitHub MCP write path (e.g. mcp__github__add_issue_comment), which Muse children lack, and the scripts/codex-review.ts fallback posts outside the child — it may post as the wrong account and come back not reviewable, so the round is dropped from collection. Document an explicit skip or wire a Muse-side posting + collection route before running; do not assume the third-party review happens.",
     });
   }
 

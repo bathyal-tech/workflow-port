@@ -13,8 +13,6 @@
 // and anything without a Rhai equivalent is flagged in the gap report while
 // the prompt text itself is still emitted.
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import {
   matchDelim,
   splitTopLevel,
@@ -23,6 +21,8 @@ import {
   collectSchemaConsts,
   regexLiteralEnd,
   MUSE_AGENT_TYPES,
+  AGENT_READ_TOOLS,
+  readAgentTools,
 } from "./convert.mjs";
 
 /**
@@ -2558,52 +2558,6 @@ export function extractFacts(source) {
 function capabilityFor(agentType, agentTypeExpr) {
   const hay = `${agentType ?? ""} ${agentTypeExpr ?? ""}`;
   return READONLY_HINT.test(hay) ? "read-only" : "all";
-}
-
-/**
- * Tools that provably only read (never modify the tree, run commands, or
- * spawn subagents). An agent file whose `tools:` frontmatter lists only
- * these is read-only; anything else (Write, Edit, Bash, Task, unknown)
- * keeps the permissive "all" mode.
- */
-const AGENT_READ_TOOLS = new Set([
-  "read",
-  "glob",
-  "grep",
-  "ls",
-  "notebookread",
-  "webfetch",
-  "websearch",
-]);
-
-/**
- * Read the `tools:` frontmatter list from an agent file
- * (`<agentsDir>/<agentType>.md`). Returns null when the file is missing,
- * unreadable, or names no tools.
- * @param {string | null | undefined} agentsDir
- * @param {string} agentType
- * @returns {string[] | null}
- */
-function readAgentTools(agentsDir, agentType) {
-  if (!agentsDir) return null;
-  const file = join(agentsDir, `${agentType}.md`);
-  if (!existsSync(file)) return null;
-  let text;
-  try {
-    text = readFileSync(file, "utf8");
-  } catch {
-    return null;
-  }
-  const fm = /^---\s*\n([\s\S]*?)\n---/.exec(text);
-  if (!fm) return null;
-  const line = fm[1].split("\n").find((l) => /^\s*tools\s*:/i.test(l));
-  if (!line) return null;
-  const tools = line
-    .slice(line.indexOf(":") + 1)
-    .split(/[,\s]+/)
-    .map((t) => t.trim().replace(/^["']|["']$/g, ""))
-    .filter(Boolean);
-  return tools.length ? tools : null;
 }
 
 /**

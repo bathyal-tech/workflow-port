@@ -576,6 +576,35 @@ export function verifyMuse(source, { agentsDir = null } = {}) {
     });
   }
 
+  // A read-only role inlined for a general-purpose child is prompt-only:
+  // Muse children get full tools, so "edit nothing" is not enforced.
+  if (
+    /read-only reviewer|readonly-reviewer/.test(source) &&
+    /general-purpose|museDispatchArgs/.test(source)
+  ) {
+    warnings.push({
+      severity: "warning",
+      code: "W_TOOL_RESTRICTION",
+      line: 1,
+      message:
+        "read-only reviewer role is prompt-only — Muse general-purpose children have no tool restriction and can still edit, commit, and push",
+      hint: "Do not run read-only gates through this port: enforce a tools allowlist Muse-side, isolate the leg in a disposable worktree without push credentials and abort on tree/HEAD changes, or keep it on a host that enforces capability.",
+    });
+  }
+  // MCP tool orders in prompts cannot run: Muse children have no MCP tools.
+  source.split("\n").forEach((text, i) => {
+    if (/^\s*(\/\/|\*)/.test(text)) return;
+    for (const m of text.matchAll(/mcp__[A-Za-z0-9_-]+/g)) {
+      warnings.push({
+        severity: "warning",
+        code: "W_MCP_TOOL",
+        line: i + 1,
+        message: `${m[0]} ordered in a prompt — Muse children have no MCP tools, so this step will not happen as written`,
+        hint: "Replace it with a Muse-side posting/collection route, or document an explicit skip before running.",
+      });
+    }
+  });
+
   if (/(^|[^\w$])model\s*:/.test(masked)) {
     warnings.push({
       severity: "warning",

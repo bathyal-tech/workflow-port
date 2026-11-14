@@ -159,6 +159,16 @@ return { status: "ok", ref: r, text: "done" };
   assert.ok(result.warnings.some((w) => w.code === "W_AGENT_TYPE_MAPPED"));
 });
 
+test("muse: read-only role and mcp__ orders warn as prompt-only", () => {
+  const src = `const MUSE_ROLE_FOR = { "readonly-reviewer": "You are a read-only reviewer. Edit nothing and run no commands." };
+const r = await agent({ input: "Request review with mcp__github__add_issue_comment.", agentType: "general-purpose", label: "codex-request" });
+return { status: "ok", ref: r, text: "done" };
+`;
+  const result = verifyMuse(src);
+  assert.ok(result.warnings.some((w) => w.code === "W_TOOL_RESTRICTION"));
+  assert.ok(result.warnings.some((w) => w.code === "W_MCP_TOOL"));
+});
+
 test("muse: legacy wrapper fails the preflight check", () => {
   const src = `export default async function workflow(host) {
   const r = await host.agent({ input: "hi" });
