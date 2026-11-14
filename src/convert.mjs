@@ -1079,6 +1079,94 @@ function mapToolInventories(code, gaps) {
   return code;
 }
 
+/**
+ * Strip `export` from declarations other than meta. The Muse runner wraps
+ * the script as a function body, where any export is a SyntaxError at
+ * preflight ("Unexpected token 'export'") — so a Claude source exporting a
+ * helper const or function must lose the keyword, keeping the local name.
+ * `export { ... }` lists are dropped (the names are already local);
+ * `export default <value>` keeps the value as a bare expression with a gap,
+ * since the port has no module consumer for it. Matches are located on the
+ * codeOnly mask so comment/string mentions are untouched.
+ * @param {string} code
+ * @param {Gap[]} gaps
+ * @returns {string}
+ */
+function stripExports(code, gaps) {
+  const masked = codeOnly(code);
+  /** @type {{ start: number, end: number }[]} */
+  const spans = [];
+  const re = /\bexport\b/g;
+  let m;
+  while ((m = re.exec(masked)) !== null) {
+    const start = m.index;
+    let i = start + "export".length;
+    while (i < masked.length && /\s/.test(masked[i] ?? "")) i += 1;
+    const rest = masked.slice(i);
+    const line = lineOf(code, start);
+    const decl = /^(const|let|var|function|class|async\s+function)\s+([A-Za-z_$][\w$]*)?/.exec(
+      rest,
+    );
+    if (decl) {
+      spans.push({ start, end: i });
+      gaps.push({
+        kind: "export",
+        line,
+        detail: `export stripped from ${decl[2] ?? decl[1]} — Muse wraps the script as a function body, where export is a SyntaxError`,
+      });
+      continue;
+    }
+    if (/^default\b/.test(rest)) {
+      let j = i + "default".length;
+      while (j < masked.length && /\s/.test(masked[j] ?? "")) j += 1;
+      const named = /^(function|class|async\s+function)\s+([A-Za-z_$][\w$]*)/.exec(masked.slice(j));
+      spans.push({ start, end: j });
+      gaps.push({
+        kind: "export",
+        line,
+        detail: named
+          ? `export default stripped from ${named[2]} — kept as a local declaration in the Muse body`
+          : "export default value kept as a bare expression — the Muse body has no module consumer; wire it up by hand if anything imported it",
+      });
+      continue;
+    }
+    if (rest.startsWith("{")) {
+      const closeIdx = matchDelim(code, i, "{", "}");
+      if (closeIdx < 0) continue;
+      let end = closeIdx + 1;
+      const tail = masked.slice(end);
+      const from = /^\s*from\s*['"][^'"]*['"]\s*;?/.exec(tail);
+      if (from) end += from[0].length;
+      else if (masked[end] === ";") end += 1;
+      spans.push({ start, end });
+      gaps.push({
+        kind: "export",
+        line,
+        detail: from
+          ? "re-export dropped — imports/re-exports have no Muse body equivalent; inline the value by hand"
+          : "export list dropped — the names stay local in the Muse body",
+      });
+      continue;
+    }
+    if (rest.startsWith("*")) {
+      const semi = masked.indexOf(";", i);
+      const end = semi >= 0 ? semi + 1 : i;
+      spans.push({ start, end });
+      gaps.push({
+        kind: "export",
+        line,
+        detail:
+          "export * dropped — imports/re-exports have no Muse body equivalent; inline the values by hand",
+      });
+    }
+  }
+  for (let s = spans.length - 1; s >= 0; s -= 1) {
+    const span = /** @type {{ start: number, end: number }} */ (spans[s]);
+    code = code.slice(0, span.start) + code.slice(span.end);
+  }
+  return code;
+}
+
 // Convert Claude Workflow source to Muse Workflow source + gap report.
 /**
  * @param {string} source
@@ -1106,6 +1194,9 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   } else {
     gaps.push({ kind: "meta", line: 1, detail: "no export const meta found" });
   }
+
+  // Any other export is a preflight SyntaxError in the wrapped Muse body.
+  code = stripExports(code, gaps);
 
   // agent(...) calls, rewritten right-to-left so offsets stay valid.
   // Matches inside comments or string/template text are skipped: the old

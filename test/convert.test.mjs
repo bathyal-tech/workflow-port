@@ -141,6 +141,28 @@ test("envelope unwrap: helper maps error_kind/null to null, data to data", () =>
   assert.equal(museResult({ ref: "r1", data: null }), null);
 });
 
+test("non-meta exports are stripped so the wrapped body compiles", async () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    "export const AGENT_TOOLS = { runner: ['read'] };",
+    "export function helper() { return 1; }",
+    "export const r = await agent('hi', { label: 'x' });",
+    "export { helper };",
+    "return { r };",
+  ].join("\n");
+  const { code, report } = convert(src, { inputName: "exports.js" });
+  assert.doesNotMatch(code, /^\s*export\b/m);
+  assert.match(code, /const AGENT_TOOLS = /);
+  assert.match(code, /function helper\(\)/);
+  assert.ok(report.gaps.some((g) => g.kind === "export" && /AGENT_TOOLS/.test(g.detail)));
+  // The whole point: the runner's wrapped-body compilation must succeed.
+  const vm = await import("node:vm");
+  const wrapped =
+    "async function __muse_workflow(agent, parallel, phase, log, pipeline, args, budget) {\n" +
+    `${code}\n}`;
+  vm.compileFunction(wrapped, []);
+});
+
 test("dispatch sanitizes schemas at runtime, whatever built them", () => {
   const museDispatchArgs = new Function(`${museHelpers([])}\n; return museDispatchArgs;`)();
   const out = museDispatchArgs("brief", {
