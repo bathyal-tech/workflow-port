@@ -141,6 +141,38 @@ test("envelope unwrap: helper maps error_kind/null to null, data to data", () =>
   assert.equal(museResult({ ref: "r1", data: null }), null);
 });
 
+test("dispatch sanitizes schemas at runtime, whatever built them", () => {
+  const museDispatchArgs = new Function(`${museHelpers([])}\n; return museDispatchArgs;`)();
+  const out = museDispatchArgs("brief", {
+    label: "x",
+    schema: {
+      type: "object",
+      description: "top-level description the Muse runner rejects",
+      additionalProperties: false,
+      required: ["status"],
+      properties: {
+        status: { type: "string", enum: ["ok"], description: "nested, also rejected" },
+        // A field *named* description is data, not a schema keyword: keep it.
+        description: { type: "string", title: "kept field, dropped keyword" },
+        tags: { type: "array", items: { type: "string", description: "in items" } },
+      },
+    },
+  });
+  assert.deepEqual(out.schema, {
+    type: "object",
+    required: ["status"],
+    properties: {
+      status: { type: "string", enum: ["ok"] },
+      description: { type: "string" },
+      tags: { type: "array", items: { type: "string" } },
+    },
+  });
+  // Non-schema options and non-object schemas pass through untouched.
+  const plain = museDispatchArgs("brief", { label: "y", schema: "RESULT_SCHEMA" });
+  assert.equal(plain.schema, "RESULT_SCHEMA");
+  assert.equal(plain.label, "y");
+});
+
 test("toil-shape: fragments, notes, titles, dynamic types, model pin, mcp", () => {
   const { code, report } = convert(toilShape, { inputName: "toil-shape.workflow.js" });
   // Choke points cover every dispatch, including the helper-defined ones.
