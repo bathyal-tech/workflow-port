@@ -169,6 +169,15 @@ return { status: "ok", ref: r, text: "done" };
   assert.ok(result.warnings.some((w) => w.code === "W_MCP_TOOL"));
 });
 
+test("muse: Claude tool names in inventories warn", () => {
+  const src = `const AGENT_TOOLS = { runner: ["Read", "Bash", "ToolSearch"] };
+const r = await agent({ input: "hi", agentType: "general-purpose" });
+return { status: "ok", ref: r, text: "done" };
+`;
+  const result = verifyMuse(src);
+  assert.ok(result.warnings.some((w) => w.code === "W_TOOL_NAMES"));
+});
+
 test("muse: legacy wrapper fails the preflight check", () => {
   const src = `export default async function workflow(host) {
   const r = await host.agent({ input: "hi" });

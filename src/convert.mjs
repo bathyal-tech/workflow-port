@@ -18,8 +18,10 @@
 //   type, enum, required, properties, items (<=4 KiB, depth <=16, <=16
 //   entries). Custom agentTypes do not exist: the catalogue is
 //   general-purpose | workflow-subagent, so a custom type is rewritten to
-//   general-purpose and reported; the agent file's prompt must be inlined
-//   by hand (semantic port) before the output is runnable.
+//   general-purpose and reported. When the agent file exists, the role
+//   prompt points at it (the child reads the full file fresh at dispatch,
+//   keeping it the single source); otherwise a short fallback role is
+//   used and the gap report asks for a hand refinement.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -180,15 +182,33 @@ export function museRoleFor(name) {
 }
 
 /**
- * Emit the injected runtime helpers (role map, envelope unwrap, dispatch
- * choke point) for the given custom agent types.
- * @param {string[]} customTypes
+ * Role prompt pointing the child at its agent file, which stays the
+ * single source: the child reads the full file fresh at dispatch.
+ * @param {string} file
  * @returns {string}
  */
-export function museHelpers(customTypes) {
-  const entries = customTypes.map(
-    (t) => `  ${JSON.stringify(t)}: ${JSON.stringify(museRoleFor(t))},`,
+export function museAgentFileRole(file) {
+  return (
+    `Read ${file} and follow it where it does not conflict with this brief. ` +
+    `That file is your full role contract; the brief below is the task.`
   );
+}
+
+/**
+ * Emit the injected runtime helpers (role map, envelope unwrap, dispatch
+ * choke point) for the given custom agent types. Types with a known agent
+ * file get a pointer role (see museAgentFileRole); the rest get the
+ * short fallback role from museRoleFor.
+ * @param {string[]} customTypes
+ * @param {Record<string, string>} [agentFiles] agent type -> agent file path
+ * @returns {string}
+ */
+export function museHelpers(customTypes, agentFiles = {}) {
+  const entries = customTypes.map((t) => {
+    const file = agentFiles[t];
+    const role = file ? museAgentFileRole(file) : museRoleFor(t);
+    return `  ${JSON.stringify(t)}: ${JSON.stringify(role)},`;
+  });
   return [
     "// wfport:begin-helpers (converter-injected Muse shims — deleted on conversion back to Claude)",
     "// Muse port: agent resolves to an envelope { ref, data, ... } —",
@@ -958,6 +978,83 @@ function analyzeSchemas(source, strippedCode, gaps) {
   return schemas;
 }
 
+/** Claude tool names with a Muse equivalent, for tool inventories. */
+export const CLAUDE_TO_MUSE_TOOL_NAMES = {
+  Read: "read",
+  Write: "write",
+  Edit: "edit",
+  Bash: "bash",
+  Glob: "search",
+  Grep: "search",
+};
+
+/**
+ * Map Claude tool names to Muse names where a whole string literal is a
+ * tool-inventory entry (an array element or object value, e.g.
+ * `AGENT_TOOLS = { runner: ["Read", "Bash"] }`). Muse children report
+ * tools as bash/read/write/edit/search, so an inventory left in Claude
+ * names makes tool-gap checks compare against names no child ever holds.
+ * Prose strings that merely mention a tool are not entries and pass
+ * through. `ToolSearch` and `mcp__*` entries have no Muse equivalent:
+ * they stay, with a gap, rather than being silently dropped.
+ * @param {string} code
+ * @param {Gap[]} gaps
+ * @returns {string}
+ */
+function mapToolInventories(code, gaps) {
+  const re = /"([^"\n]*)"|'([^'\n]*)'/g;
+  /** @type {{ start: number, end: number, muse: string }[]} */
+  const edits = [];
+  /** @type {Map<string, number>} */
+  const mapped = new Map();
+  /** @type {Map<string, number>} */
+  const unmappable = new Map();
+  let m;
+  while ((m = re.exec(code)) !== null) {
+    const name = m[1] ?? m[2] ?? "";
+    const muse = /** @type {Record<string, string>} */ (CLAUDE_TO_MUSE_TOOL_NAMES)[name];
+    const isUnmappable = name === "ToolSearch" || name.startsWith("mcp__");
+    if (!muse && !isUnmappable) continue;
+    let p = m.index - 1;
+    while (p >= 0 && /\s/.test(code[p] ?? "")) p -= 1;
+    let q = m.index + m[0].length;
+    while (q < code.length && /\s/.test(code[q] ?? "")) q += 1;
+    const prev = p >= 0 ? code[p] : "";
+    const next = q < code.length ? code[q] : "";
+    const isEntry = (prev === "[" || prev === "," || prev === ":") && ",]}".includes(next ?? "");
+    if (!isEntry) continue;
+    const line = lineOf(code, m.index);
+    if (muse) {
+      edits.push({ start: m.index + 1, end: m.index + 1 + name.length, muse });
+      if (!mapped.has(name)) mapped.set(name, line);
+    } else if (!unmappable.has(name)) {
+      unmappable.set(name, line);
+    }
+  }
+  for (let i = edits.length - 1; i >= 0; i -= 1) {
+    const e = /** @type {{ start: number, end: number, muse: string }} */ (edits[i]);
+    code = code.slice(0, e.start) + e.muse + code.slice(e.end);
+  }
+  if (mapped.size) {
+    const pairs = [...mapped.keys()]
+      .map((n) => `${n}->${/** @type {Record<string, string>} */ (CLAUDE_TO_MUSE_TOOL_NAMES)[n]}`)
+      .join(", ");
+    gaps.push({
+      kind: "tool-names",
+      line: [...mapped.values()][0] ?? 1,
+      detail: `tool inventory names mapped to Muse equivalents (${pairs}) — Muse children report tools under these names, so tool-gap checks must compare against them`,
+    });
+  }
+  for (const [name, line] of unmappable) {
+    gaps.push({
+      kind: "tool-names",
+      line,
+      detail: `${name} has no Muse equivalent — Muse children never hold it; remove it from tool inventories (or document the step as skipped) or tool-gap reporting will chase a gap that can never close`,
+    });
+  }
+  return code;
+}
+
 // Convert Claude Workflow source to Muse Workflow source + gap report.
 /**
  * @param {string} source
@@ -1016,6 +1113,9 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   // fragments (INHERITED_PROPERTY) that spread into schemas.
   code = stripSchemas(code, gaps);
 
+  // Tool inventories (AGENT_TOOLS-style name lists) become Muse tool names.
+  code = mapToolInventories(code, gaps);
+
   // Custom agentTypes: every literal anywhere in code plus dynamic
   // expressions. The injected museDispatchArgs choke point maps them at
   // runtime, so per-literal static rewrites would lose the role prompt.
@@ -1023,12 +1123,22 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   const customTypes = [
     ...new Set(found.literals.filter((l) => !MUSE_AGENT_TYPES.has(l.value)).map((l) => l.value)),
   ].sort();
+  /** @type {Record<string, string>} */
+  const agentFiles = {};
+  for (const t of customTypes) {
+    if (agentsDir && existsSync(join(agentsDir, `${t}.md`))) {
+      agentFiles[t] = join(agentsDir, `${t}.md`);
+    }
+  }
   for (const l of found.literals) {
     if (MUSE_AGENT_TYPES.has(l.value)) continue;
+    const file = agentFiles[l.value];
     gaps.push({
       kind: "agentType",
       line: l.line,
-      detail: `${l.value} — mapped to general-purpose via museDispatchArgs; refine the role prompt by inlining .claude/agents/${l.value}.md`,
+      detail: file
+        ? `${l.value} — mapped to general-purpose via museDispatchArgs; role prompt points at ${file} (child reads it fresh at dispatch)`
+        : `${l.value} — mapped to general-purpose via museDispatchArgs; refine the role prompt by inlining .claude/agents/${l.value}.md`,
     });
     // A read-only tools list in the agent file is a physical restriction
     // in Claude; Muse general-purpose children get full tools, so the
@@ -1057,6 +1167,10 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   }
   const agentTypeReport = customTypes.map((value) => {
     const tools = readAgentTools(agentsDir, value);
+    const file = agentFiles[value];
+    const base = file
+      ? `mapped to general-purpose via museDispatchArgs; role prompt points at ${file} — child reads it fresh each dispatch`
+      : "mapped to general-purpose via museDispatchArgs with a short role prompt — refine by inlining the agent file's prompt";
     return {
       value,
       muse: "general-purpose",
@@ -1064,8 +1178,8 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
       agentFileExists: agentsDir ? existsSync(join(agentsDir, `${value}.md`)) : null,
       tools,
       action: isReadOnlyTools(tools)
-        ? "mapped to general-purpose via museDispatchArgs with a short role prompt — WARNING: the agent file's read-only tools restriction is lost (prompt-only, not enforced); see the tool-restriction gap"
-        : "mapped to general-purpose via museDispatchArgs with a short role prompt — refine by inlining the agent file's prompt",
+        ? `${base} — WARNING: the agent file's read-only tools restriction is lost (prompt-only, not enforced); see the tool-restriction gap`
+        : base,
     };
   });
 
@@ -1185,7 +1299,7 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
     "// Review every TODO/gap in the conversion report before running.",
     "",
   ].join("\n");
-  const helpers = museHelpers(customTypes);
+  const helpers = museHelpers(customTypes, agentFiles);
   const wrapped = `${header}${helpers}\n${code.trimEnd()}\n`;
 
   const report = {

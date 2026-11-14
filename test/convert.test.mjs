@@ -197,6 +197,20 @@ test("read-only agent file tools are a blocking tool-restriction gap for muse", 
   assert.ok(!rep2.gaps.some((g) => g.kind === "tool-restriction" && /tl-reporter/.test(g.detail)));
 });
 
+test("existing agent files are pointed at, not collapsed to one-line roles", () => {
+  const { code, report } = convert(sample, {
+    inputName: "sample.workflow.js",
+    agentsDir: join(here, "fixtures", "agents"),
+  });
+  // readonly-reviewer.md exists in the fixtures dir: pointer, not the short role.
+  assert.match(code, /"readonly-reviewer": "Read .*readonly-reviewer\.md and follow it/);
+  assert.doesNotMatch(code, /"readonly-reviewer": "You are a read-only reviewer/);
+  // bg-fix has no agent file: the short fallback role stays.
+  assert.match(code, /"bg-fix": "You are a bg-fix agent/);
+  const entry = report.agentTypes.find((a) => a.value === "readonly-reviewer");
+  assert.match(entry?.action ?? "", /points at/);
+});
+
 test("mcp__ tool orders in prompts are flagged for muse children", () => {
   const src = [
     'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
@@ -218,6 +232,32 @@ test("codex-review fallback path is flagged even without tl-runner", () => {
   ].join("\n");
   const { report } = convert(src, { inputName: "codex-fallback.js" });
   assert.ok(report.gaps.some((g) => g.kind === "codex-mcp"));
+});
+
+test("tool inventories map Claude tool names to Muse names; mcp/ToolSearch flagged", () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const AGENT_TOOLS = { runner: ["Read", "Write", "Bash", "Glob", "Grep"], reviewer: ["Read", "ToolSearch", "mcp__github__add_issue_comment"] };',
+    "const recordToolGaps = (held) => AGENT_TOOLS.runner.filter((t) => !held.includes(t));",
+    'const r = await agent("Do it.", { label: "x" });',
+    "return { r };",
+  ].join("\n");
+  const { code, report } = convert(src, { inputName: "tools.js" });
+  // Whole-string inventory entries become Muse tool names.
+  assert.match(code, /"read", "write", "bash", "search", "search"/);
+  assert.doesNotMatch(code, /"(Read|Write|Bash|Glob|Grep)"/);
+  // Names with no Muse equivalent stay, but are reported, not silent.
+  assert.match(code, /"ToolSearch"/);
+  const gap = report.gaps.find((g) => g.kind === "tool-names" && /ToolSearch/.test(g.detail));
+  assert.ok(gap, "expected a tool-names gap for ToolSearch");
+  assert.match(gap.detail, /no Muse equivalent/);
+  assert.ok(report.gaps.some((g) => g.kind === "tool-names" && /Read->read/.test(g.detail)));
+  // Prose mentioning a tool is not an inventory entry and is left alone.
+  const prose = convert(
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };\nconst r = await agent("Use the Read tool first, then Bash.", { label: "x" });\nreturn { r };\n',
+    { inputName: "prose.js" },
+  );
+  assert.match(prose.code, /Use the Read tool first, then Bash\./);
 });
 
 test("banned APIs count only in code, with real lines", () => {

@@ -554,7 +554,7 @@ export function verifyMuse(source, { agentsDir = null } = {}) {
         code: "W_AGENT_TYPE_MAPPED",
         line: l.line,
         message: `"${l.value}" rides museDispatchArgs to general-purpose — refine the role prompt`,
-        hint: `Inline .claude/agents/${l.value}.md into the role map when the prompt needs it.`,
+        hint: `Point the role prompt at .claude/agents/${l.value}.md (child reads it at dispatch) when the short role is not enough.`,
       });
     } else {
       errors.push({
@@ -604,6 +604,26 @@ export function verifyMuse(source, { agentsDir = null } = {}) {
       });
     }
   });
+
+  // Claude tool names left in an inventory compare against names Muse
+  // children never hold; ToolSearch/mcp__* have no Muse equivalent at all.
+  {
+    const toolNames = new Set();
+    for (const m of source.matchAll(
+      /["'](Read|Write|Edit|Bash|Glob|Grep|ToolSearch)["']\s*[,}\]]/g,
+    )) {
+      toolNames.add(m[1]);
+    }
+    if (toolNames.size) {
+      warnings.push({
+        severity: "warning",
+        code: "W_TOOL_NAMES",
+        line: 1,
+        message: `Claude tool names in a tool inventory (${[...toolNames].join(", ")}) — Muse children report tools as bash/read/write/edit/search`,
+        hint: "Map inventories to Muse tool names (Read->read, Write->write, Edit->edit, Bash->bash, Glob/Grep->search) and drop ToolSearch/mcp__* entries, or tool-gap reporting will be wrong.",
+      });
+    }
+  }
 
   if (/(^|[^\w$])model\s*:/.test(masked)) {
     warnings.push({
