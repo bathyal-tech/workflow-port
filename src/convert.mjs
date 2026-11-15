@@ -60,6 +60,7 @@ import { join } from "node:path";
  * @property {AgentTypeReport[]} agentTypes
  * @property {SchemaInfo[]} schemas
  * @property {string[]} banned
+ * @property {PreserveEntry[]} preserved
  * @property {Gap[]} gaps
  */
 
@@ -922,18 +923,239 @@ function convertAgentCall(inner, gaps, line) {
 }
 
 /**
+ * One schema key a target dialect cannot express, recorded for round-trip
+ * restore in a wfport:preserve block.
+ * @typedef {object} PreserveEntry
+ * @property {string} kind
+ * @property {string} schema
+ * @property {(string | number)[]} path
+ * @property {string} key
+ * @property {string} valueSrc
+ */
+
+/** Schema keys Muse rejects that Claude/Grok can express again. */
+const PRESERVE_SCHEMA_KEYS = new Set(["description", "title", "notes", ...SCHEMA_KEYWORDS_BAD]);
+
+/**
+ * End index (exclusive) of the value starting at `from` in `code`, using
+ * the codeOnly mask so strings/comments never confuse the depth scan.
+ * @param {string} code
+ * @param {string} masked
+ * @param {number} from
+ * @returns {number}
+ */
+function schemaValueEnd(code, masked, from) {
+  const ch = masked[from] ?? "";
+  if (ch === "{") return matchDelim(code, from, "{", "}") + 1;
+  if (ch === "[") return matchDelim(code, from, "[", "]") + 1;
+  if (ch === '"' || ch === "'" || ch === "`") {
+    const close = masked.indexOf(ch, from + 1);
+    return close < 0 ? code.length : close + 1;
+  }
+  let depth = 0;
+  let i = from;
+  while (i < masked.length) {
+    const c = masked[i] ?? "";
+    if (c === "(" || c === "[" || c === "{") depth += 1;
+    else if (c === ")" || c === "]" || c === "}") {
+      if (depth === 0) return i;
+      depth -= 1;
+    } else if (c === "," && depth === 0) return i;
+    i += 1;
+  }
+  return i;
+}
+
+/**
+ * Entries of the object literal whose `{` is at `openIdx`: key plus the
+ * value's span in `code`. Returns [] for a non-object or unbalanced text.
+ * @param {string} code
+ * @param {number} openIdx
+ * @returns {{ key: string, valueStart: number, valueEnd: number }[]}
+ */
+export function parseSchemaEntries(code, openIdx) {
+  if (code[openIdx] !== "{") return [];
+  const closeIdx = matchDelim(code, openIdx, "{", "}");
+  if (closeIdx < 0) return [];
+  const masked = codeOnly(code);
+  /** @type {{ key: string, valueStart: number, valueEnd: number }[]} */
+  const out = [];
+  let i = openIdx + 1;
+  while (i < closeIdx) {
+    while (i < closeIdx && /[\s,]/.test(masked[i] ?? "")) i += 1;
+    if (i >= closeIdx) break;
+    let key = "";
+    if (masked[i] === '"' || masked[i] === "'") {
+      const q = masked[i];
+      const end = masked.indexOf(q ?? "", i + 1);
+      if (end < 0 || end > closeIdx) break;
+      key = code.slice(i + 1, end);
+      i = end + 1;
+    } else {
+      const km = /^[A-Za-z_$][\w$]*/.exec(masked.slice(i, closeIdx));
+      if (!km) break;
+      key = km[0];
+      i += km[0].length;
+    }
+    while (i < closeIdx && /\s/.test(masked[i] ?? "")) i += 1;
+    if (masked[i] !== ":") break;
+    i += 1;
+    while (i < closeIdx && /\s/.test(masked[i] ?? "")) i += 1;
+    const valueStart = i;
+    const valueEnd = schemaValueEnd(code, masked, i);
+    out.push({ key, valueStart, valueEnd });
+    i = valueEnd;
+  }
+  return out;
+}
+
+/**
+ * Element spans of the array literal whose `[` is at `openIdx`.
+ * @param {string} code
+ * @param {number} openIdx
+ * @returns {{ start: number, end: number }[]}
+ */
+export function parseSchemaElements(code, openIdx) {
+  if (code[openIdx] !== "[") return [];
+  const closeIdx = matchDelim(code, openIdx, "[", "]");
+  if (closeIdx < 0) return [];
+  const masked = codeOnly(code);
+  /** @type {{ start: number, end: number }[]} */
+  const out = [];
+  let i = openIdx + 1;
+  while (i < closeIdx) {
+    while (i < closeIdx && /[\s,]/.test(masked[i] ?? "")) i += 1;
+    if (i >= closeIdx) break;
+    const end = schemaValueEnd(code, masked, i);
+    out.push({ start: i, end });
+    i = end;
+  }
+  return out;
+}
+
+/**
+ * Collect the schema keys stripping will remove from one literal, with
+ * their property paths, so they can be recorded and later restored.
+ * Entries under `properties:` are field definitions, not keywords — a
+ * field *named* `pattern` or `description` is data and is descended into,
+ * never recorded itself.
+ * @param {string} literal
+ * @param {string} schema
+ * @returns {PreserveEntry[]}
+ */
+function collectPreservedSchemaKeys(literal, schema) {
+  /** @type {PreserveEntry[]} */
+  const out = [];
+  /**
+   * @param {number} start
+   * @param {(string | number)[]} path
+   * @param {boolean} inProperties
+   */
+  const visit = (start, path, inProperties) => {
+    const ch = literal[start];
+    if (ch === "[") {
+      parseSchemaElements(literal, start).forEach((el, idx) =>
+        visit(el.start, [...path, idx], false),
+      );
+      return;
+    }
+    if (ch !== "{") return;
+    for (const e of parseSchemaEntries(literal, start)) {
+      const valueSrc = literal.slice(e.valueStart, e.valueEnd).trim();
+      if (inProperties) {
+        visit(e.valueStart, [...path, e.key], false);
+        continue;
+      }
+      if (PRESERVE_SCHEMA_KEYS.has(e.key)) {
+        // Mirror what stripSchemaProps actually removes: description/title
+        // only when string-valued, notes only when object-valued.
+        const stringValued =
+          valueSrc.startsWith('"') || valueSrc.startsWith("'") || valueSrc.startsWith("`");
+        if ((e.key === "description" || e.key === "title") && !stringValued) {
+          visit(e.valueStart, [...path, e.key], false);
+          continue;
+        }
+        if (e.key === "notes" && !valueSrc.startsWith("{")) {
+          visit(e.valueStart, [...path, e.key], false);
+          continue;
+        }
+        out.push({ kind: "schema-key", schema, path, key: e.key, valueSrc });
+        continue;
+      }
+      visit(e.valueStart, [...path, e.key], e.key === "properties");
+    }
+  };
+  visit(0, [], false);
+  return out;
+}
+
+/**
+ * Render recorded entries as a wfport:preserve comment block. Comments are
+ * data in every dialect — runners ignore them, converters read them back.
+ * @param {PreserveEntry[]} entries
+ * @returns {string}
+ */
+function preserveBlock(entries) {
+  if (!entries.length) return "";
+  const lines = [
+    "// wfport:preserve-v1 begin",
+    "// Schema keys the Muse spec cannot express, recorded by workflow-port",
+    "// so a conversion back to Claude/Grok restores them. Data only — the",
+    "// runner ignores comments. Edit the schema, not this block; a stale",
+    "// entry is reported and dropped on the way back.",
+    ...entries.map((e) => `// wfport:preserve ${JSON.stringify(e)}`),
+    "// wfport:preserve-v1 end",
+    "",
+  ];
+  return lines.join("\n");
+}
+
+/**
+ * Parse a wfport:preserve block out of converted code, removing it.
+ * @param {string} code
+ * @returns {{ entries: PreserveEntry[], code: string, bad: number }}
+ */
+export function takePreserveBlock(code) {
+  /** @type {PreserveEntry[]} */
+  const entries = [];
+  let bad = 0;
+  const kept = [];
+  for (const line of code.split("\n")) {
+    if (/^\/\/ wfport:preserve-v1 (begin|end)\s*$/.test(line)) continue;
+    const m = /^\/\/ wfport:preserve (\{.*\})\s*$/.exec(line);
+    if (m) {
+      try {
+        const parsed = JSON.parse(m[1] ?? "");
+        if (parsed && parsed.kind === "schema-key" && typeof parsed.schema === "string") {
+          entries.push(parsed);
+        } else bad += 1;
+      } catch {
+        bad += 1;
+      }
+      continue;
+    }
+    kept.push(line);
+  }
+  return { entries, code: kept.join("\n"), bad };
+}
+
+/**
  * Strip Muse-rejected keys from schema-like consts in place (right to
- * left so offsets stay valid). Lines reported are source-relative: later
- * splices never move an earlier const's start.
+ * left so offsets stay valid), recording each removed key for round-trip
+ * restore. Lines reported are source-relative: later splices never move
+ * an earlier const's start.
  * @param {string} code
  * @param {Gap[]} gaps
- * @returns {string}
+ * @returns {{ code: string, preserved: PreserveEntry[] }}
  */
 function stripSchemas(code, gaps) {
   const consts = collectSchemaConsts(code);
+  /** @type {PreserveEntry[]} */
+  const preserved = [];
   for (let i = consts.length - 1; i >= 0; i -= 1) {
     const c = consts[i];
     const literal = code.slice(c.openIdx, c.closeIdx + 1);
+    preserved.unshift(...collectPreservedSchemaKeys(literal, c.name));
     const { text, removed } = stripSchemaProps(literal);
     const total = removed.description + removed.title + removed.notes + removed.constraints;
     if (total === 0) continue;
@@ -947,10 +1169,10 @@ function stripSchemas(code, gaps) {
     gaps.push({
       kind: "schema",
       line: lineOf(code, c.openIdx),
-      detail: `${c.name}: removed ${parts.join(", ")} (Muse inline schemas reject them)`,
+      detail: `${c.name}: removed ${parts.join(", ")} (Muse inline schemas reject them; recorded in the wfport:preserve block)`,
     });
   }
-  return code;
+  return { code, preserved };
 }
 
 /**
@@ -1226,7 +1448,8 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
 
   // Strip Muse-rejected keys from schema-like consts, including helper
   // fragments (INHERITED_PROPERTY) that spread into schemas.
-  code = stripSchemas(code, gaps);
+  const strippedSchemas = stripSchemas(code, gaps);
+  code = strippedSchemas.code;
 
   // Tool inventories (AGENT_TOOLS-style name lists) become Muse tool names.
   code = mapToolInventories(code, gaps);
@@ -1415,7 +1638,7 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
     "",
   ].join("\n");
   const helpers = museHelpers(customTypes, agentFiles);
-  const wrapped = `${header}${helpers}\n${code.trimEnd()}\n`;
+  const wrapped = `${header}${preserveBlock(strippedSchemas.preserved)}${helpers}\n${code.trimEnd()}\n`;
 
   const report = {
     input: inputName,
@@ -1425,6 +1648,7 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
     agentTypes: agentTypeReport,
     schemas,
     banned,
+    preserved: strippedSchemas.preserved,
     gaps,
   };
   return { code: wrapped, report };

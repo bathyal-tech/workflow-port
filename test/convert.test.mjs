@@ -380,7 +380,10 @@ test("convert strips rejected schema constraints and reports them clean", () => 
     "return { r };",
   ].join("\n");
   const { code, report } = convert(src, { inputName: "min.js" });
-  assert.doesNotMatch(code, /minimum/);
+  // The executable schema is clean; the word survives only as data in the
+  // wfport:preserve comment, where the Muse runner ignores it.
+  assert.doesNotMatch(code.slice(code.indexOf("const RESULT_SCHEMA")), /minimum/);
+  assert.match(code, /\/\/ wfport:preserve \{.*"key":"minimum"/);
   assert.deepEqual(report.schemas[0]?.issues, []);
   assert.ok(report.gaps.some((g) => g.kind === "schema" && /rejected constraint/.test(g.detail)));
 });
