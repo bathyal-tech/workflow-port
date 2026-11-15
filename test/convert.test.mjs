@@ -141,6 +141,60 @@ test("envelope unwrap: helper maps error_kind/null to null, data to data", () =>
   assert.equal(museResult({ ref: "r1", data: null }), null);
 });
 
+test("non-meta exports are stripped so the wrapped body compiles", async () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    "export const AGENT_TOOLS = { runner: ['read'] };",
+    "export function helper() { return 1; }",
+    "export const r = await agent('hi', { label: 'x' });",
+    "export { helper };",
+    "return { r };",
+  ].join("\n");
+  const { code, report } = convert(src, { inputName: "exports.js" });
+  assert.doesNotMatch(code, /^\s*export\b/m);
+  assert.match(code, /const AGENT_TOOLS = /);
+  assert.match(code, /function helper\(\)/);
+  assert.ok(report.gaps.some((g) => g.kind === "export" && /AGENT_TOOLS/.test(g.detail)));
+  // The whole point: the runner's wrapped-body compilation must succeed.
+  const vm = await import("node:vm");
+  const wrapped =
+    "async function __muse_workflow(agent, parallel, phase, log, pipeline, args, budget) {\n" +
+    `${code}\n}`;
+  vm.compileFunction(wrapped, []);
+});
+
+test("dispatch sanitizes schemas at runtime, whatever built them", () => {
+  const museDispatchArgs = new Function(`${museHelpers([])}\n; return museDispatchArgs;`)();
+  const out = museDispatchArgs("brief", {
+    label: "x",
+    schema: {
+      type: "object",
+      description: "top-level description the Muse runner rejects",
+      additionalProperties: false,
+      required: ["status"],
+      properties: {
+        status: { type: "string", enum: ["ok"], description: "nested, also rejected" },
+        // A field *named* description is data, not a schema keyword: keep it.
+        description: { type: "string", title: "kept field, dropped keyword" },
+        tags: { type: "array", items: { type: "string", description: "in items" } },
+      },
+    },
+  });
+  assert.deepEqual(out.schema, {
+    type: "object",
+    required: ["status"],
+    properties: {
+      status: { type: "string", enum: ["ok"] },
+      description: { type: "string" },
+      tags: { type: "array", items: { type: "string" } },
+    },
+  });
+  // Non-schema options and non-object schemas pass through untouched.
+  const plain = museDispatchArgs("brief", { label: "y", schema: "RESULT_SCHEMA" });
+  assert.equal(plain.schema, "RESULT_SCHEMA");
+  assert.equal(plain.label, "y");
+});
+
 test("toil-shape: fragments, notes, titles, dynamic types, model pin, mcp", () => {
   const { code, report } = convert(toilShape, { inputName: "toil-shape.workflow.js" });
   // Choke points cover every dispatch, including the helper-defined ones.
@@ -175,6 +229,89 @@ test("toil-shape: fragments, notes, titles, dynamic types, model pin, mcp", () =
   assert.ok(!report.gaps.some((g) => g.kind === "banned-api"));
   assert.ok(!report.banned.length);
   for (const s of report.schemas) assert.deepEqual(s.issues, []);
+});
+
+test("read-only agent file tools are a blocking tool-restriction gap for muse", () => {
+  const { report } = convert(sample, {
+    inputName: "sample.workflow.js",
+    agentsDir: join(here, "fixtures", "agents"),
+  });
+  const gap = report.gaps.find((g) => g.kind === "tool-restriction");
+  assert.ok(gap, "expected a tool-restriction gap");
+  assert.match(gap.detail, /readonly-reviewer/);
+  assert.match(gap.detail, /Read, Glob, Grep/);
+  assert.match(gap.detail, /prompt-only|NOT enforced/);
+  const entry = report.agentTypes.find((a) => a.value === "readonly-reviewer");
+  assert.deepEqual(entry?.tools, ["Read", "Glob", "Grep"]);
+  // A write-capable agent file (Read, Write) is not a read-only restriction.
+  const { report: rep2 } = convert(toilRounds, {
+    inputName: "toil-rounds.workflow.js",
+    agentsDir: join(here, "fixtures", "agents"),
+  });
+  assert.ok(!rep2.gaps.some((g) => g.kind === "tool-restriction" && /tl-reporter/.test(g.detail)));
+});
+
+test("existing agent files are pointed at, not collapsed to one-line roles", () => {
+  const { code, report } = convert(sample, {
+    inputName: "sample.workflow.js",
+    agentsDir: join(here, "fixtures", "agents"),
+  });
+  // readonly-reviewer.md exists in the fixtures dir: pointer, not the short role.
+  assert.match(code, /"readonly-reviewer": "Read .*readonly-reviewer\.md and follow it/);
+  assert.doesNotMatch(code, /"readonly-reviewer": "You are a read-only reviewer/);
+  // bg-fix has no agent file: the short fallback role stays.
+  assert.match(code, /"bg-fix": "You are a bg-fix agent/);
+  const entry = report.agentTypes.find((a) => a.value === "readonly-reviewer");
+  assert.match(entry?.action ?? "", /points at/);
+});
+
+test("mcp__ tool orders in prompts are flagged for muse children", () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const r = await agent("Request review with mcp__github__add_issue_comment, then collect it.", { label: "codex-request" });',
+    "return { r };",
+  ].join("\n");
+  const { report } = convert(src, { inputName: "mcp.js" });
+  const gap = report.gaps.find((g) => g.kind === "mcp-tool");
+  assert.ok(gap, "expected an mcp-tool gap");
+  assert.match(gap.detail, /mcp__github__add_issue_comment/);
+  assert.match(gap.detail, /no MCP tools/);
+});
+
+test("codex-review fallback path is flagged even without tl-runner", () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const r = await agent("Fall back to scripts/codex-review.ts when the mention fails.", { label: "codex-request" });',
+    "return { r };",
+  ].join("\n");
+  const { report } = convert(src, { inputName: "codex-fallback.js" });
+  assert.ok(report.gaps.some((g) => g.kind === "codex-mcp"));
+});
+
+test("tool inventories map Claude tool names to Muse names; mcp/ToolSearch flagged", () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const AGENT_TOOLS = { runner: ["Read", "Write", "Bash", "Glob", "Grep"], reviewer: ["Read", "ToolSearch", "mcp__github__add_issue_comment"] };',
+    "const recordToolGaps = (held) => AGENT_TOOLS.runner.filter((t) => !held.includes(t));",
+    'const r = await agent("Do it.", { label: "x" });',
+    "return { r };",
+  ].join("\n");
+  const { code, report } = convert(src, { inputName: "tools.js" });
+  // Whole-string inventory entries become Muse tool names.
+  assert.match(code, /"read", "write", "bash", "search", "search"/);
+  assert.doesNotMatch(code, /"(Read|Write|Bash|Glob|Grep)"/);
+  // Names with no Muse equivalent stay, but are reported, not silent.
+  assert.match(code, /"ToolSearch"/);
+  const gap = report.gaps.find((g) => g.kind === "tool-names" && /ToolSearch/.test(g.detail));
+  assert.ok(gap, "expected a tool-names gap for ToolSearch");
+  assert.match(gap.detail, /no Muse equivalent/);
+  assert.ok(report.gaps.some((g) => g.kind === "tool-names" && /Read->read/.test(g.detail)));
+  // Prose mentioning a tool is not an inventory entry and is left alone.
+  const prose = convert(
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };\nconst r = await agent("Use the Read tool first, then Bash.", { label: "x" });\nreturn { r };\n',
+    { inputName: "prose.js" },
+  );
+  assert.match(prose.code, /Use the Read tool first, then Bash\./);
 });
 
 test("banned APIs count only in code, with real lines", () => {
@@ -243,7 +380,10 @@ test("convert strips rejected schema constraints and reports them clean", () => 
     "return { r };",
   ].join("\n");
   const { code, report } = convert(src, { inputName: "min.js" });
-  assert.doesNotMatch(code, /minimum/);
+  // The executable schema is clean; the word survives only as data in the
+  // wfport:preserve comment, where the Muse runner ignores it.
+  assert.doesNotMatch(code.slice(code.indexOf("const RESULT_SCHEMA")), /minimum/);
+  assert.match(code, /\/\/ wfport:preserve \{.*"key":"minimum"/);
   assert.deepEqual(report.schemas[0]?.issues, []);
   assert.ok(report.gaps.some((g) => g.kind === "schema" && /rejected constraint/.test(g.detail)));
 });

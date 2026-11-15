@@ -162,7 +162,9 @@ counterpart to derive from.
 Custom `agentType`s (Muse only knows `general-purpose` / `workflow-subagent` —
 inline the `.claude/agents/<name>.md` prompt by hand); schema keys Muse inline
 schemas reject (`description`, `title`, `notes`, and constraint keys such as
-`minimum`, `anyOf`, `$ref`, …) are stripped from schema consts and reported;
+`minimum`, `anyOf`, `$ref`, …) are stripped from schema consts and reported —
+and recorded in a `wfport:preserve` comment block, so converting the Muse
+file back to Claude restores them instead of losing them for good;
 schemas over 4 KiB; dynamic
 option objects; `Date.now` / `Math.random`; fan-out beyond ~15 children; missing
 terminal `return { status, ref, text }`. The `--agents-dir` option (default:

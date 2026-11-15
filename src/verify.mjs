@@ -554,7 +554,7 @@ export function verifyMuse(source, { agentsDir = null } = {}) {
         code: "W_AGENT_TYPE_MAPPED",
         line: l.line,
         message: `"${l.value}" rides museDispatchArgs to general-purpose — refine the role prompt`,
-        hint: `Inline .claude/agents/${l.value}.md into the role map when the prompt needs it.`,
+        hint: `Point the role prompt at .claude/agents/${l.value}.md (child reads it at dispatch) when the short role is not enough.`,
       });
     } else {
       errors.push({
@@ -574,6 +574,55 @@ export function verifyMuse(source, { agentsDir = null } = {}) {
       message: `dynamic agentType ${d.expr} — confirm every value is a Muse built-in`,
       hint: "List the possible values in a comment so reviewers can check them.",
     });
+  }
+
+  // A read-only role inlined for a general-purpose child is prompt-only:
+  // Muse children get full tools, so "edit nothing" is not enforced.
+  if (
+    /read-only reviewer|readonly-reviewer/.test(source) &&
+    /general-purpose|museDispatchArgs/.test(source)
+  ) {
+    warnings.push({
+      severity: "warning",
+      code: "W_TOOL_RESTRICTION",
+      line: 1,
+      message:
+        "read-only reviewer role is prompt-only — Muse general-purpose children have no tool restriction and can still edit, commit, and push",
+      hint: "Do not run read-only gates through this port: enforce a tools allowlist Muse-side, isolate the leg in a disposable worktree without push credentials and abort on tree/HEAD changes, or keep it on a host that enforces capability.",
+    });
+  }
+  // MCP tool orders in prompts cannot run: Muse children have no MCP tools.
+  source.split("\n").forEach((text, i) => {
+    if (/^\s*(\/\/|\*)/.test(text)) return;
+    for (const m of text.matchAll(/mcp__[A-Za-z0-9_-]+/g)) {
+      warnings.push({
+        severity: "warning",
+        code: "W_MCP_TOOL",
+        line: i + 1,
+        message: `${m[0]} ordered in a prompt — Muse children have no MCP tools, so this step will not happen as written`,
+        hint: "Replace it with a Muse-side posting/collection route, or document an explicit skip before running.",
+      });
+    }
+  });
+
+  // Claude tool names left in an inventory compare against names Muse
+  // children never hold; ToolSearch/mcp__* have no Muse equivalent at all.
+  {
+    const toolNames = new Set();
+    for (const m of source.matchAll(
+      /["'](Read|Write|Edit|Bash|Glob|Grep|ToolSearch)["']\s*[,}\]]/g,
+    )) {
+      toolNames.add(m[1]);
+    }
+    if (toolNames.size) {
+      warnings.push({
+        severity: "warning",
+        code: "W_TOOL_NAMES",
+        line: 1,
+        message: `Claude tool names in a tool inventory (${[...toolNames].join(", ")}) — Muse children report tools as bash/read/write/edit/search`,
+        hint: "Map inventories to Muse tool names (Read->read, Write->write, Edit->edit, Bash->bash, Glob/Grep->search) and drop ToolSearch/mcp__* entries, or tool-gap reporting will be wrong.",
+      });
+    }
   }
 
   if (/(^|[^\w$])model\s*:/.test(masked)) {

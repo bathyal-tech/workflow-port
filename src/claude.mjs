@@ -12,7 +12,17 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { matchDelim, splitTopLevel, splitRequestObject, lineOf, codeOnly } from "./convert.mjs";
+import {
+  matchDelim,
+  splitTopLevel,
+  splitRequestObject,
+  lineOf,
+  codeOnly,
+  collectSchemaConsts,
+  parseSchemaEntries,
+  parseSchemaElements,
+  takePreserveBlock,
+} from "./convert.mjs";
 import { splitMuseDispatch } from "./muse.mjs";
 
 /**
@@ -125,6 +135,73 @@ function unhost(code, name) {
   return code;
 }
 
+/**
+ * Restore schema keys recorded in a wfport:preserve block (Claude -> Muse
+ * stripping) into their schema consts. Each entry re-resolves its anchor
+ * against the current code, so earlier splices never stale the offsets.
+ * Target code wins: a key that already exists, a missing schema, or a
+ * missing path segment is reported as a preserve gap and left untouched.
+ * @param {string} code
+ * @param {import("./convert.mjs").PreserveEntry[]} entries
+ * @param {Gap[]} gaps
+ * @returns {string}
+ */
+function restorePreservedSchemas(code, entries, gaps) {
+  for (const entry of entries) {
+    const c = collectSchemaConsts(code).find((s) => s.name === entry.schema);
+    if (!c) {
+      gaps.push({
+        kind: "preserve",
+        line: 1,
+        detail: `${entry.schema}: preserved ${entry.key} dropped — schema const not found (stale wfport:preserve entry)`,
+      });
+      continue;
+    }
+    let at = c.openIdx;
+    let ok = true;
+    for (const seg of entry.path) {
+      if (typeof seg === "number") {
+        const el = parseSchemaElements(code, at)[seg];
+        if (!el) {
+          ok = false;
+          break;
+        }
+        at = el.start;
+      } else {
+        const hit = parseSchemaEntries(code, at).find((e) => e.key === seg);
+        if (!hit) {
+          ok = false;
+          break;
+        }
+        at = hit.valueStart;
+      }
+    }
+    if (!ok || code[at] !== "{") {
+      gaps.push({
+        kind: "preserve",
+        line: lineOf(code, c.openIdx),
+        detail: `${entry.schema}: preserved ${entry.key} dropped — path ${entry.path.join(".") || "<root>"} not found (stale wfport:preserve entry)`,
+      });
+      continue;
+    }
+    if (parseSchemaEntries(code, at).some((e) => e.key === entry.key)) {
+      gaps.push({
+        kind: "preserve",
+        line: lineOf(code, c.openIdx),
+        detail: `${entry.schema}: preserved ${entry.key} not restored — the Muse code already carries that key (target code wins)`,
+      });
+      continue;
+    }
+    const closeIdx = matchDelim(code, at, "{", "}");
+    const empty = closeIdx >= 0 && code.slice(at + 1, closeIdx).trim() === "";
+    const insertion = empty
+      ? ` ${entry.key}: ${entry.valueSrc} `
+      : ` ${entry.key}: ${entry.valueSrc},`;
+    code = code.slice(0, at + 1) + insertion + code.slice(at + 1);
+  }
+  return code;
+}
+
 // Convert a Muse Workflow script (legacy wrapper or V1 body shape) to a
 // Claude Workflow script.
 /**
@@ -136,6 +213,19 @@ export function convertMuseToClaude(source, { inputName = "<input>", agentsDir =
   /** @type {Gap[]} */
   const gaps = [];
   let code = source;
+
+  // A wfport:preserve block (Claude -> Muse) is consumed here: entries
+  // restore stripped schema keys below, and the block never reaches the
+  // Claude output.
+  const preserve = takePreserveBlock(code);
+  code = preserve.code;
+  if (preserve.bad > 0) {
+    gaps.push({
+      kind: "preserve",
+      line: 1,
+      detail: `${preserve.bad} malformed wfport:preserve entr${preserve.bad === 1 ? "y" : "ies"} dropped`,
+    });
+  }
 
   const wrapMatch = code.match(
     /export\s+default\s+async\s+function\s+workflow\s*\(\s*host\s*\)\s*\{/,
@@ -335,6 +425,8 @@ export function convertMuseToClaude(source, { inputName = "<input>", agentsDir =
       detail: "no return — Claude scripts end with a top-level return carrying the result",
     });
   }
+
+  if (preserve.entries.length) code = restorePreservedSchemas(code, preserve.entries, gaps);
 
   const agentTypeNames = [
     ...new Set([...code.matchAll(/agentType\s*:\s*(['"])([^'"]+)\1/g)].map((m) => m[2])),

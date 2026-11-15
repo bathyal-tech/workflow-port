@@ -27,6 +27,57 @@ let r1 = agent(
 complete(#{ status: "done" });
 `;
 
+test("claude->muse->claude: stripped schema keys round-trip via wfport:preserve", () => {
+  const claudeSrc = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    "const RESULT_SCHEMA = {",
+    '  type: "object",',
+    '  description: "top-level schema note",',
+    '  required: ["status"],',
+    "  properties: {",
+    '    status: { type: "string", enum: ["ok"], description: "probe status" },',
+    '    count: { type: "integer", minimum: 1 },',
+    '    description: { type: "string" },',
+    "  },",
+    "};",
+    'const r = await agent("hi", { label: "x", schema: RESULT_SCHEMA });',
+    "return { status: r, ref: r, text: r };",
+  ].join("\n");
+  const muse = convert(claudeSrc, { inputName: "roundtrip.claude.js" });
+  // Muse output cannot carry the keys, but records them for the way back.
+  assert.match(muse.code, /\/\/ wfport:preserve-v1 begin/);
+  assert.match(muse.code, /\/\/ wfport:preserve \{.*"schema":"RESULT_SCHEMA".*"key":"description"/);
+  const schemaText = muse.code.slice(muse.code.indexOf("const RESULT_SCHEMA"));
+  assert.doesNotMatch(schemaText.slice(0, schemaText.indexOf("};")), /description: "probe status"/);
+  assert.doesNotMatch(schemaText.slice(0, schemaText.indexOf("};")), /minimum/);
+
+  const back = convertMuseToClaude(muse.code, { inputName: "roundtrip.muse.js" });
+  assert.match(back.code, /description: "top-level schema note"/);
+  assert.match(back.code, /description: "probe status"/);
+  assert.match(back.code, /minimum: 1/);
+  // The field *named* description survives as a field, exactly once as a keyword restore.
+  assert.match(back.code, /description: \{ type: "string" \}/);
+  assert.doesNotMatch(back.code, /wfport:preserve/);
+  assert.doesNotMatch(back.code, /museDispatchArgs|museSchema/);
+
+  // And the cycle is idempotent: converting back to Muse re-records them.
+  const again = convert(back.code, { inputName: "roundtrip2.claude.js" });
+  assert.match(again.code, /\/\/ wfport:preserve \{.*"key":"description"/);
+});
+
+test("muse->claude: stale preserve entries report a gap, target code wins", () => {
+  const src = [
+    "// wfport:preserve-v1 begin",
+    '// wfport:preserve {"kind":"schema-key","schema":"GONE_SCHEMA","path":[],"key":"description","valueSrc":"\\"lost\\""}',
+    "// wfport:preserve-v1 end",
+    'const r = await agent({ input: "hi", agentType: "general-purpose", label: "x" });',
+    'return { status: "ok", ref: r, text: "done" };',
+  ].join("\n");
+  const { code, report } = convertMuseToClaude(src, { inputName: "stale.muse.js" });
+  assert.doesNotMatch(code, /wfport:preserve/);
+  assert.ok(report.gaps.some((g) => g.kind === "preserve" && /GONE_SCHEMA/.test(g.detail)));
+});
+
 test("muse->claude: wrapper unwrapped, calls lowered, control flow kept", () => {
   const { code, report } = convertMuseToClaude(MUSE_SRC, { inputName: "flow.muse.js" });
   assert.doesNotMatch(code, /export default async function workflow\(host\)/);

@@ -18,10 +18,12 @@
 //   type, enum, required, properties, items (<=4 KiB, depth <=16, <=16
 //   entries). Custom agentTypes do not exist: the catalogue is
 //   general-purpose | workflow-subagent, so a custom type is rewritten to
-//   general-purpose and reported; the agent file's prompt must be inlined
-//   by hand (semantic port) before the output is runnable.
+//   general-purpose and reported. When the agent file exists, the role
+//   prompt points at it (the child reads the full file fresh at dispatch,
+//   keeping it the single source); otherwise a short fallback role is
+//   used and the gap report asks for a hand refinement.
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -47,6 +49,7 @@ import { join } from "node:path";
  * @property {string} muse
  * @property {string | null} agentFile
  * @property {boolean | null} agentFileExists
+ * @property {string[] | null} tools
  * @property {string} action
  *
  * @typedef {object} ConvertReport
@@ -57,6 +60,7 @@ import { join } from "node:path";
  * @property {AgentTypeReport[]} agentTypes
  * @property {SchemaInfo[]} schemas
  * @property {string[]} banned
+ * @property {PreserveEntry[]} preserved
  * @property {Gap[]} gaps
  */
 
@@ -107,6 +111,68 @@ export const MUSE_KNOWN_ROLES = {
  * @param {string} name
  * @returns {string}
  */
+/**
+ * Tools that provably only read (never modify the tree, run commands, or
+ * spawn subagents). An agent file whose `tools:` frontmatter lists only
+ * these is read-only; anything else (Write, Edit, Bash, Task, unknown)
+ * keeps the permissive "all" mode.
+ */
+export const AGENT_READ_TOOLS = new Set([
+  "read",
+  "glob",
+  "grep",
+  "ls",
+  "notebookread",
+  "webfetch",
+  "websearch",
+]);
+
+/**
+ * Read the `tools:` frontmatter list from an agent file
+ * (`<agentsDir>/<agentType>.md`). Returns null when the file is missing,
+ * unreadable, or names no tools.
+ * @param {string | null | undefined} agentsDir
+ * @param {string} agentType
+ * @returns {string[] | null}
+ */
+export function readAgentTools(agentsDir, agentType) {
+  if (!agentsDir) return null;
+  const file = join(agentsDir, `${agentType}.md`);
+  if (!existsSync(file)) return null;
+  let text;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  const fm = /^---\s*\n([\s\S]*?)\n---/.exec(text);
+  if (!fm) return null;
+  const line = fm[1].split("\n").find((l) => /^\s*tools\s*:/i.test(l));
+  if (!line) return null;
+  const tools = line
+    .slice(line.indexOf(":") + 1)
+    .split(/[,\s]+/)
+    .map((t) => t.trim().replace(/^["']|["']$/g, ""))
+    .filter(Boolean);
+  return tools.length ? tools : null;
+}
+
+/**
+ * True when a tools list grants only read tools — a physical restriction
+ * in Claude (the agent file) that no Muse prompt can reproduce.
+ * @param {string[] | null} tools
+ * @returns {boolean}
+ */
+export function isReadOnlyTools(tools) {
+  return !!tools && tools.length > 0 && tools.every((t) => AGENT_READ_TOOLS.has(t.toLowerCase()));
+}
+
+/**
+ * Role prompt for a custom agent type: a known short prompt, else a generic
+ * mechanical-runner prompt carrying the type name.
+ * @param {string} name
+ * @returns {string}
+ */
 export function museRoleFor(name) {
   const known = /** @type {Record<string, string>} */ (MUSE_KNOWN_ROLES)[name];
   if (known) return known;
@@ -117,26 +183,67 @@ export function museRoleFor(name) {
 }
 
 /**
- * Emit the injected runtime helpers (role map, envelope unwrap, dispatch
- * choke point) for the given custom agent types.
- * @param {string[]} customTypes
+ * Role prompt pointing the child at its agent file, which stays the
+ * single source: the child reads the full file fresh at dispatch.
+ * @param {string} file
  * @returns {string}
  */
-export function museHelpers(customTypes) {
-  const entries = customTypes.map(
-    (t) => `  ${JSON.stringify(t)}: ${JSON.stringify(museRoleFor(t))},`,
+export function museAgentFileRole(file) {
+  return (
+    `Read ${file} and follow it where it does not conflict with this brief. ` +
+    `That file is your full role contract; the brief below is the task.`
   );
+}
+
+/**
+ * Emit the injected runtime helpers (role map, envelope unwrap, dispatch
+ * choke point) for the given custom agent types. Types with a known agent
+ * file get a pointer role (see museAgentFileRole); the rest get the
+ * short fallback role from museRoleFor.
+ * @param {string[]} customTypes
+ * @param {Record<string, string>} [agentFiles] agent type -> agent file path
+ * @returns {string}
+ */
+export function museHelpers(customTypes, agentFiles = {}) {
+  const entries = customTypes.map((t) => {
+    const file = agentFiles[t];
+    const role = file ? museAgentFileRole(file) : museRoleFor(t);
+    return `  ${JSON.stringify(t)}: ${JSON.stringify(role)},`;
+  });
   return [
     "// wfport:begin-helpers (converter-injected Muse shims — deleted on conversion back to Claude)",
     "// Muse port: agent resolves to an envelope { ref, data, ... } —",
     "// museResult unwraps to data, mapping errors/stalls (error_kind) to null",
     "// so callers hit the resume path instead of operating on empty values.",
     "// museDispatchArgs maps Claude-only agentTypes to general-purpose with the",
-    "// role prompt prepended, and drops Claude-only model pins (the session",
-    "// route inherits). Central choke point so dynamic option flows",
-    "// (spec.agentType, options.runnerType) are covered too.",
+    "// role prompt prepended, drops Claude-only model pins (the session",
+    "// route inherits), and sanitizes schemas via museSchema. Central choke",
+    "// point so dynamic option flows (spec.agentType, options.runnerType)",
+    "// are covered too.",
     "const MUSE_ROLE_FOR = {",
     ...entries,
+    "};",
+    "// museSchema rebuilds a schema from only the keys the Muse runner",
+    "// accepts (type/enum/required/properties/items), at any depth. It runs",
+    "// at dispatch, so schemas assembled dynamically (spec.schema, spread",
+    "// fragments) are clean too — static stripping cannot see those, and a",
+    "// surviving description makes the runner reject the call. Field names",
+    "// under properties are data and are kept; their subschemas recurse.",
+    "const museSchema = (s) => {",
+    '  if (!s || typeof s !== "object" || Array.isArray(s)) return s;',
+    "  const out = {};",
+    "  for (const [k, v] of Object.entries(s)) {",
+    '    if (k === "properties" && v && typeof v === "object" && !Array.isArray(v)) {',
+    "      out.properties = Object.fromEntries(",
+    "        Object.entries(v).map(([field, sub]) => [field, museSchema(sub)]),",
+    "      );",
+    '    } else if (k === "items") {',
+    "      out.items = museSchema(v);",
+    '    } else if (k === "type" || k === "enum" || k === "required") {',
+    "      out[k] = v;",
+    "    }",
+    "  }",
+    "  return out;",
     "};",
     "const museResult = (res) => {",
     "  if (res === null || res === undefined) return null;",
@@ -150,6 +257,7 @@ export function museHelpers(customTypes) {
     "  const out = { ...(opts || {}) };",
     '  if (t !== "general-purpose" && t !== "workflow-subagent") out.agentType = "general-purpose";',
     '  if ("model" in out) delete out.model;',
+    '  if ("schema" in out) out.schema = museSchema(out.schema);',
     "  out.input = role ? `${role}\\n\\n${input}` : input;",
     "  return out;",
     "};",
@@ -815,18 +923,239 @@ function convertAgentCall(inner, gaps, line) {
 }
 
 /**
+ * One schema key a target dialect cannot express, recorded for round-trip
+ * restore in a wfport:preserve block.
+ * @typedef {object} PreserveEntry
+ * @property {string} kind
+ * @property {string} schema
+ * @property {(string | number)[]} path
+ * @property {string} key
+ * @property {string} valueSrc
+ */
+
+/** Schema keys Muse rejects that Claude/Grok can express again. */
+const PRESERVE_SCHEMA_KEYS = new Set(["description", "title", "notes", ...SCHEMA_KEYWORDS_BAD]);
+
+/**
+ * End index (exclusive) of the value starting at `from` in `code`, using
+ * the codeOnly mask so strings/comments never confuse the depth scan.
+ * @param {string} code
+ * @param {string} masked
+ * @param {number} from
+ * @returns {number}
+ */
+function schemaValueEnd(code, masked, from) {
+  const ch = masked[from] ?? "";
+  if (ch === "{") return matchDelim(code, from, "{", "}") + 1;
+  if (ch === "[") return matchDelim(code, from, "[", "]") + 1;
+  if (ch === '"' || ch === "'" || ch === "`") {
+    const close = masked.indexOf(ch, from + 1);
+    return close < 0 ? code.length : close + 1;
+  }
+  let depth = 0;
+  let i = from;
+  while (i < masked.length) {
+    const c = masked[i] ?? "";
+    if (c === "(" || c === "[" || c === "{") depth += 1;
+    else if (c === ")" || c === "]" || c === "}") {
+      if (depth === 0) return i;
+      depth -= 1;
+    } else if (c === "," && depth === 0) return i;
+    i += 1;
+  }
+  return i;
+}
+
+/**
+ * Entries of the object literal whose `{` is at `openIdx`: key plus the
+ * value's span in `code`. Returns [] for a non-object or unbalanced text.
+ * @param {string} code
+ * @param {number} openIdx
+ * @returns {{ key: string, valueStart: number, valueEnd: number }[]}
+ */
+export function parseSchemaEntries(code, openIdx) {
+  if (code[openIdx] !== "{") return [];
+  const closeIdx = matchDelim(code, openIdx, "{", "}");
+  if (closeIdx < 0) return [];
+  const masked = codeOnly(code);
+  /** @type {{ key: string, valueStart: number, valueEnd: number }[]} */
+  const out = [];
+  let i = openIdx + 1;
+  while (i < closeIdx) {
+    while (i < closeIdx && /[\s,]/.test(masked[i] ?? "")) i += 1;
+    if (i >= closeIdx) break;
+    let key = "";
+    if (masked[i] === '"' || masked[i] === "'") {
+      const q = masked[i];
+      const end = masked.indexOf(q ?? "", i + 1);
+      if (end < 0 || end > closeIdx) break;
+      key = code.slice(i + 1, end);
+      i = end + 1;
+    } else {
+      const km = /^[A-Za-z_$][\w$]*/.exec(masked.slice(i, closeIdx));
+      if (!km) break;
+      key = km[0];
+      i += km[0].length;
+    }
+    while (i < closeIdx && /\s/.test(masked[i] ?? "")) i += 1;
+    if (masked[i] !== ":") break;
+    i += 1;
+    while (i < closeIdx && /\s/.test(masked[i] ?? "")) i += 1;
+    const valueStart = i;
+    const valueEnd = schemaValueEnd(code, masked, i);
+    out.push({ key, valueStart, valueEnd });
+    i = valueEnd;
+  }
+  return out;
+}
+
+/**
+ * Element spans of the array literal whose `[` is at `openIdx`.
+ * @param {string} code
+ * @param {number} openIdx
+ * @returns {{ start: number, end: number }[]}
+ */
+export function parseSchemaElements(code, openIdx) {
+  if (code[openIdx] !== "[") return [];
+  const closeIdx = matchDelim(code, openIdx, "[", "]");
+  if (closeIdx < 0) return [];
+  const masked = codeOnly(code);
+  /** @type {{ start: number, end: number }[]} */
+  const out = [];
+  let i = openIdx + 1;
+  while (i < closeIdx) {
+    while (i < closeIdx && /[\s,]/.test(masked[i] ?? "")) i += 1;
+    if (i >= closeIdx) break;
+    const end = schemaValueEnd(code, masked, i);
+    out.push({ start: i, end });
+    i = end;
+  }
+  return out;
+}
+
+/**
+ * Collect the schema keys stripping will remove from one literal, with
+ * their property paths, so they can be recorded and later restored.
+ * Entries under `properties:` are field definitions, not keywords — a
+ * field *named* `pattern` or `description` is data and is descended into,
+ * never recorded itself.
+ * @param {string} literal
+ * @param {string} schema
+ * @returns {PreserveEntry[]}
+ */
+function collectPreservedSchemaKeys(literal, schema) {
+  /** @type {PreserveEntry[]} */
+  const out = [];
+  /**
+   * @param {number} start
+   * @param {(string | number)[]} path
+   * @param {boolean} inProperties
+   */
+  const visit = (start, path, inProperties) => {
+    const ch = literal[start];
+    if (ch === "[") {
+      parseSchemaElements(literal, start).forEach((el, idx) =>
+        visit(el.start, [...path, idx], false),
+      );
+      return;
+    }
+    if (ch !== "{") return;
+    for (const e of parseSchemaEntries(literal, start)) {
+      const valueSrc = literal.slice(e.valueStart, e.valueEnd).trim();
+      if (inProperties) {
+        visit(e.valueStart, [...path, e.key], false);
+        continue;
+      }
+      if (PRESERVE_SCHEMA_KEYS.has(e.key)) {
+        // Mirror what stripSchemaProps actually removes: description/title
+        // only when string-valued, notes only when object-valued.
+        const stringValued =
+          valueSrc.startsWith('"') || valueSrc.startsWith("'") || valueSrc.startsWith("`");
+        if ((e.key === "description" || e.key === "title") && !stringValued) {
+          visit(e.valueStart, [...path, e.key], false);
+          continue;
+        }
+        if (e.key === "notes" && !valueSrc.startsWith("{")) {
+          visit(e.valueStart, [...path, e.key], false);
+          continue;
+        }
+        out.push({ kind: "schema-key", schema, path, key: e.key, valueSrc });
+        continue;
+      }
+      visit(e.valueStart, [...path, e.key], e.key === "properties");
+    }
+  };
+  visit(0, [], false);
+  return out;
+}
+
+/**
+ * Render recorded entries as a wfport:preserve comment block. Comments are
+ * data in every dialect — runners ignore them, converters read them back.
+ * @param {PreserveEntry[]} entries
+ * @returns {string}
+ */
+function preserveBlock(entries) {
+  if (!entries.length) return "";
+  const lines = [
+    "// wfport:preserve-v1 begin",
+    "// Schema keys the Muse spec cannot express, recorded by workflow-port",
+    "// so a conversion back to Claude/Grok restores them. Data only — the",
+    "// runner ignores comments. Edit the schema, not this block; a stale",
+    "// entry is reported and dropped on the way back.",
+    ...entries.map((e) => `// wfport:preserve ${JSON.stringify(e)}`),
+    "// wfport:preserve-v1 end",
+    "",
+  ];
+  return lines.join("\n");
+}
+
+/**
+ * Parse a wfport:preserve block out of converted code, removing it.
+ * @param {string} code
+ * @returns {{ entries: PreserveEntry[], code: string, bad: number }}
+ */
+export function takePreserveBlock(code) {
+  /** @type {PreserveEntry[]} */
+  const entries = [];
+  let bad = 0;
+  const kept = [];
+  for (const line of code.split("\n")) {
+    if (/^\/\/ wfport:preserve-v1 (begin|end)\s*$/.test(line)) continue;
+    const m = /^\/\/ wfport:preserve (\{.*\})\s*$/.exec(line);
+    if (m) {
+      try {
+        const parsed = JSON.parse(m[1] ?? "");
+        if (parsed && parsed.kind === "schema-key" && typeof parsed.schema === "string") {
+          entries.push(parsed);
+        } else bad += 1;
+      } catch {
+        bad += 1;
+      }
+      continue;
+    }
+    kept.push(line);
+  }
+  return { entries, code: kept.join("\n"), bad };
+}
+
+/**
  * Strip Muse-rejected keys from schema-like consts in place (right to
- * left so offsets stay valid). Lines reported are source-relative: later
- * splices never move an earlier const's start.
+ * left so offsets stay valid), recording each removed key for round-trip
+ * restore. Lines reported are source-relative: later splices never move
+ * an earlier const's start.
  * @param {string} code
  * @param {Gap[]} gaps
- * @returns {string}
+ * @returns {{ code: string, preserved: PreserveEntry[] }}
  */
 function stripSchemas(code, gaps) {
   const consts = collectSchemaConsts(code);
+  /** @type {PreserveEntry[]} */
+  const preserved = [];
   for (let i = consts.length - 1; i >= 0; i -= 1) {
     const c = consts[i];
     const literal = code.slice(c.openIdx, c.closeIdx + 1);
+    preserved.unshift(...collectPreservedSchemaKeys(literal, c.name));
     const { text, removed } = stripSchemaProps(literal);
     const total = removed.description + removed.title + removed.notes + removed.constraints;
     if (total === 0) continue;
@@ -840,10 +1169,10 @@ function stripSchemas(code, gaps) {
     gaps.push({
       kind: "schema",
       line: lineOf(code, c.openIdx),
-      detail: `${c.name}: removed ${parts.join(", ")} (Muse inline schemas reject them)`,
+      detail: `${c.name}: removed ${parts.join(", ")} (Muse inline schemas reject them; recorded in the wfport:preserve block)`,
     });
   }
-  return code;
+  return { code, preserved };
 }
 
 /**
@@ -895,6 +1224,171 @@ function analyzeSchemas(source, strippedCode, gaps) {
   return schemas;
 }
 
+/** Claude tool names with a Muse equivalent, for tool inventories. */
+export const CLAUDE_TO_MUSE_TOOL_NAMES = {
+  Read: "read",
+  Write: "write",
+  Edit: "edit",
+  Bash: "bash",
+  Glob: "search",
+  Grep: "search",
+};
+
+/**
+ * Map Claude tool names to Muse names where a whole string literal is a
+ * tool-inventory entry (an array element or object value, e.g.
+ * `AGENT_TOOLS = { runner: ["Read", "Bash"] }`). Muse children report
+ * tools as bash/read/write/edit/search, so an inventory left in Claude
+ * names makes tool-gap checks compare against names no child ever holds.
+ * Prose strings that merely mention a tool are not entries and pass
+ * through. `ToolSearch` and `mcp__*` entries have no Muse equivalent:
+ * they stay, with a gap, rather than being silently dropped.
+ * @param {string} code
+ * @param {Gap[]} gaps
+ * @returns {string}
+ */
+function mapToolInventories(code, gaps) {
+  const re = /"([^"\n]*)"|'([^'\n]*)'/g;
+  /** @type {{ start: number, end: number, muse: string }[]} */
+  const edits = [];
+  /** @type {Map<string, number>} */
+  const mapped = new Map();
+  /** @type {Map<string, number>} */
+  const unmappable = new Map();
+  let m;
+  while ((m = re.exec(code)) !== null) {
+    const name = m[1] ?? m[2] ?? "";
+    const muse = /** @type {Record<string, string>} */ (CLAUDE_TO_MUSE_TOOL_NAMES)[name];
+    const isUnmappable = name === "ToolSearch" || name.startsWith("mcp__");
+    if (!muse && !isUnmappable) continue;
+    let p = m.index - 1;
+    while (p >= 0 && /\s/.test(code[p] ?? "")) p -= 1;
+    let q = m.index + m[0].length;
+    while (q < code.length && /\s/.test(code[q] ?? "")) q += 1;
+    const prev = p >= 0 ? code[p] : "";
+    const next = q < code.length ? code[q] : "";
+    const isEntry = (prev === "[" || prev === "," || prev === ":") && ",]}".includes(next ?? "");
+    if (!isEntry) continue;
+    const line = lineOf(code, m.index);
+    if (muse) {
+      edits.push({ start: m.index + 1, end: m.index + 1 + name.length, muse });
+      if (!mapped.has(name)) mapped.set(name, line);
+    } else if (!unmappable.has(name)) {
+      unmappable.set(name, line);
+    }
+  }
+  for (let i = edits.length - 1; i >= 0; i -= 1) {
+    const e = /** @type {{ start: number, end: number, muse: string }} */ (edits[i]);
+    code = code.slice(0, e.start) + e.muse + code.slice(e.end);
+  }
+  if (mapped.size) {
+    const pairs = [...mapped.keys()]
+      .map((n) => `${n}->${/** @type {Record<string, string>} */ (CLAUDE_TO_MUSE_TOOL_NAMES)[n]}`)
+      .join(", ");
+    gaps.push({
+      kind: "tool-names",
+      line: [...mapped.values()][0] ?? 1,
+      detail: `tool inventory names mapped to Muse equivalents (${pairs}) — Muse children report tools under these names, so tool-gap checks must compare against them`,
+    });
+  }
+  for (const [name, line] of unmappable) {
+    gaps.push({
+      kind: "tool-names",
+      line,
+      detail: `${name} has no Muse equivalent — Muse children never hold it; remove it from tool inventories (or document the step as skipped) or tool-gap reporting will chase a gap that can never close`,
+    });
+  }
+  return code;
+}
+
+/**
+ * Strip `export` from declarations other than meta. The Muse runner wraps
+ * the script as a function body, where any export is a SyntaxError at
+ * preflight ("Unexpected token 'export'") — so a Claude source exporting a
+ * helper const or function must lose the keyword, keeping the local name.
+ * `export { ... }` lists are dropped (the names are already local);
+ * `export default <value>` keeps the value as a bare expression with a gap,
+ * since the port has no module consumer for it. Matches are located on the
+ * codeOnly mask so comment/string mentions are untouched.
+ * @param {string} code
+ * @param {Gap[]} gaps
+ * @returns {string}
+ */
+function stripExports(code, gaps) {
+  const masked = codeOnly(code);
+  /** @type {{ start: number, end: number }[]} */
+  const spans = [];
+  const re = /\bexport\b/g;
+  let m;
+  while ((m = re.exec(masked)) !== null) {
+    const start = m.index;
+    let i = start + "export".length;
+    while (i < masked.length && /\s/.test(masked[i] ?? "")) i += 1;
+    const rest = masked.slice(i);
+    const line = lineOf(code, start);
+    const decl = /^(const|let|var|function|class|async\s+function)\s+([A-Za-z_$][\w$]*)?/.exec(
+      rest,
+    );
+    if (decl) {
+      spans.push({ start, end: i });
+      gaps.push({
+        kind: "export",
+        line,
+        detail: `export stripped from ${decl[2] ?? decl[1]} — Muse wraps the script as a function body, where export is a SyntaxError`,
+      });
+      continue;
+    }
+    if (/^default\b/.test(rest)) {
+      let j = i + "default".length;
+      while (j < masked.length && /\s/.test(masked[j] ?? "")) j += 1;
+      const named = /^(function|class|async\s+function)\s+([A-Za-z_$][\w$]*)/.exec(masked.slice(j));
+      spans.push({ start, end: j });
+      gaps.push({
+        kind: "export",
+        line,
+        detail: named
+          ? `export default stripped from ${named[2]} — kept as a local declaration in the Muse body`
+          : "export default value kept as a bare expression — the Muse body has no module consumer; wire it up by hand if anything imported it",
+      });
+      continue;
+    }
+    if (rest.startsWith("{")) {
+      const closeIdx = matchDelim(code, i, "{", "}");
+      if (closeIdx < 0) continue;
+      let end = closeIdx + 1;
+      const tail = masked.slice(end);
+      const from = /^\s*from\s*['"][^'"]*['"]\s*;?/.exec(tail);
+      if (from) end += from[0].length;
+      else if (masked[end] === ";") end += 1;
+      spans.push({ start, end });
+      gaps.push({
+        kind: "export",
+        line,
+        detail: from
+          ? "re-export dropped — imports/re-exports have no Muse body equivalent; inline the value by hand"
+          : "export list dropped — the names stay local in the Muse body",
+      });
+      continue;
+    }
+    if (rest.startsWith("*")) {
+      const semi = masked.indexOf(";", i);
+      const end = semi >= 0 ? semi + 1 : i;
+      spans.push({ start, end });
+      gaps.push({
+        kind: "export",
+        line,
+        detail:
+          "export * dropped — imports/re-exports have no Muse body equivalent; inline the values by hand",
+      });
+    }
+  }
+  for (let s = spans.length - 1; s >= 0; s -= 1) {
+    const span = /** @type {{ start: number, end: number }} */ (spans[s]);
+    code = code.slice(0, span.start) + code.slice(span.end);
+  }
+  return code;
+}
+
 // Convert Claude Workflow source to Muse Workflow source + gap report.
 /**
  * @param {string} source
@@ -922,6 +1416,9 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   } else {
     gaps.push({ kind: "meta", line: 1, detail: "no export const meta found" });
   }
+
+  // Any other export is a preflight SyntaxError in the wrapped Muse body.
+  code = stripExports(code, gaps);
 
   // agent(...) calls, rewritten right-to-left so offsets stay valid.
   // Matches inside comments or string/template text are skipped: the old
@@ -951,7 +1448,11 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
 
   // Strip Muse-rejected keys from schema-like consts, including helper
   // fragments (INHERITED_PROPERTY) that spread into schemas.
-  code = stripSchemas(code, gaps);
+  const strippedSchemas = stripSchemas(code, gaps);
+  code = strippedSchemas.code;
+
+  // Tool inventories (AGENT_TOOLS-style name lists) become Muse tool names.
+  code = mapToolInventories(code, gaps);
 
   // Custom agentTypes: every literal anywhere in code plus dynamic
   // expressions. The injected museDispatchArgs choke point maps them at
@@ -960,13 +1461,40 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   const customTypes = [
     ...new Set(found.literals.filter((l) => !MUSE_AGENT_TYPES.has(l.value)).map((l) => l.value)),
   ].sort();
+  /** @type {Record<string, string>} */
+  const agentFiles = {};
+  for (const t of customTypes) {
+    if (agentsDir && existsSync(join(agentsDir, `${t}.md`))) {
+      agentFiles[t] = join(agentsDir, `${t}.md`);
+    }
+  }
   for (const l of found.literals) {
     if (MUSE_AGENT_TYPES.has(l.value)) continue;
+    const file = agentFiles[l.value];
     gaps.push({
       kind: "agentType",
       line: l.line,
-      detail: `${l.value} — mapped to general-purpose via museDispatchArgs; refine the role prompt by inlining .claude/agents/${l.value}.md`,
+      detail: file
+        ? `${l.value} — mapped to general-purpose via museDispatchArgs; role prompt points at ${file} (child reads it fresh at dispatch)`
+        : `${l.value} — mapped to general-purpose via museDispatchArgs; refine the role prompt by inlining .claude/agents/${l.value}.md`,
     });
+    // A read-only tools list in the agent file is a physical restriction
+    // in Claude; Muse general-purpose children get full tools, so the
+    // inlined "edit nothing" role prompt is prompt-only and NOT enforced.
+    const tools = readAgentTools(agentsDir, l.value);
+    if (isReadOnlyTools(tools)) {
+      gaps.push({
+        kind: "tool-restriction",
+        line: l.line,
+        detail:
+          `${l.value}: agent file limits tools to ${(tools ?? []).join(", ")} — Muse ` +
+          `general-purpose has no tool restriction, so this becomes prompt-only and NOT enforced ` +
+          `(the child can still edit, commit, and push). Do not run read-only gates through this ` +
+          `port: enforce it Muse-side (a per-call tools allowlist), or isolate the review leg ` +
+          `in a disposable worktree without push credentials and abort if the tree or HEAD ` +
+          `changes, or keep that leg on a host that enforces capability.`,
+      });
+    }
   }
   for (const d of found.dynamics) {
     gaps.push({
@@ -975,14 +1503,23 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
       detail: `dynamic agentType ${d.expr} — mapped at runtime via museDispatchArgs; verify the role prompt covers its values`,
     });
   }
-  const agentTypeReport = customTypes.map((value) => ({
-    value,
-    muse: "general-purpose",
-    agentFile: agentsDir ? join(agentsDir, `${value}.md`) : null,
-    agentFileExists: agentsDir ? existsSync(join(agentsDir, `${value}.md`)) : null,
-    action:
-      "mapped to general-purpose via museDispatchArgs with a short role prompt — refine by inlining the agent file's prompt",
-  }));
+  const agentTypeReport = customTypes.map((value) => {
+    const tools = readAgentTools(agentsDir, value);
+    const file = agentFiles[value];
+    const base = file
+      ? `mapped to general-purpose via museDispatchArgs; role prompt points at ${file} — child reads it fresh each dispatch`
+      : "mapped to general-purpose via museDispatchArgs with a short role prompt — refine by inlining the agent file's prompt";
+    return {
+      value,
+      muse: "general-purpose",
+      agentFile: agentsDir ? join(agentsDir, `${value}.md`) : null,
+      agentFileExists: agentsDir ? existsSync(join(agentsDir, `${value}.md`)) : null,
+      tools,
+      action: isReadOnlyTools(tools)
+        ? `${base} — WARNING: the agent file's read-only tools restriction is lost (prompt-only, not enforced); see the tool-restriction gap`
+        : base,
+    };
+  });
 
   // Every dispatch already routes through the choke points (mapping +
   // unwrap) — convertAgentCall emits that form directly.
@@ -997,14 +1534,44 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
     });
   }
 
-  // Codex-review degradation: the tl-runner MCP mention path has no Muse
-  // equivalent — a documented skip, not a silent mapping.
-  if (customTypes.includes("tl-runner") && /@codex|\bMCP\b/i.test(source)) {
+  // MCP tool orders inside prompts: Muse children have no MCP tools, so
+  // an instruction like "post with mcp__github__add_issue_comment" cannot
+  // run as written. Prompt text lives in string literals, so scan the raw
+  // source (codeOnly would blank it); comment-only lines are not orders.
+  /** @type {{ tool: string, line: number }[]} */
+  const mcpOrders = [];
+  source.split("\n").forEach((text, i) => {
+    if (/^\s*(\/\/|\*)/.test(text)) return;
+    for (const m of text.matchAll(/mcp__[A-Za-z0-9_-]+/g)) {
+      mcpOrders.push({ tool: m[0], line: i + 1 });
+    }
+  });
+  for (const order of mcpOrders) {
+    gaps.push({
+      kind: "mcp-tool",
+      line: order.line,
+      detail:
+        `${order.tool} — Muse children have no MCP tools, so this order cannot run as ` +
+        `written and the step it drives will silently never happen. Replace it with a ` +
+        `Muse-side posting/collection route, or document an explicit skip before running.`,
+    });
+  }
+
+  // Codex-review degradation: the @codex mention path (GitHub MCP write,
+  // or the scripts/codex-review.ts fallback outside the child) has no Muse
+  // equivalent — a documented skip, not a silent mapping. The fallback
+  // posts outside the child, may post as a different account, and its
+  // result may not be collected as a reviewable review.
+  if (
+    (customTypes.includes("tl-runner") && /@codex|\bMCP\b/i.test(source)) ||
+    /codex-review(\.ts)?\b/i.test(source) ||
+    (/@codex\b/i.test(source) && mcpOrders.length > 0)
+  ) {
     gaps.push({
       kind: "codex-mcp",
       line: 1,
       detail:
-        "tl-runner posts the @codex mention via the GitHub MCP write path, which Muse children lack — document a skip or a Muse-side posting route (gh api writes as the wrong account)",
+        "codex review round: the @codex mention rides the GitHub MCP write path (e.g. mcp__github__add_issue_comment), which Muse children lack, and the scripts/codex-review.ts fallback posts outside the child — it may post as the wrong account and come back not reviewable, so the round is dropped from collection. Document an explicit skip or wire a Muse-side posting + collection route before running; do not assume the third-party review happens.",
     });
   }
 
@@ -1070,8 +1637,8 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
     "// Review every TODO/gap in the conversion report before running.",
     "",
   ].join("\n");
-  const helpers = museHelpers(customTypes);
-  const wrapped = `${header}${helpers}\n${code.trimEnd()}\n`;
+  const helpers = museHelpers(customTypes, agentFiles);
+  const wrapped = `${header}${preserveBlock(strippedSchemas.preserved)}${helpers}\n${code.trimEnd()}\n`;
 
   const report = {
     input: inputName,
@@ -1081,6 +1648,7 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
     agentTypes: agentTypeReport,
     schemas,
     banned,
+    preserved: strippedSchemas.preserved,
     gaps,
   };
   return { code: wrapped, report };
