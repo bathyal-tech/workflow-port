@@ -50,6 +50,7 @@ import { join } from "node:path";
  * @property {string | null} agentFile
  * @property {boolean | null} agentFileExists
  * @property {string[] | null} tools
+ * @property {string | null} [model]
  * @property {string} action
  *
  * @typedef {object} ConvertReport
@@ -135,7 +136,13 @@ export const AGENT_READ_TOOLS = new Set([
  * @param {string} agentType
  * @returns {string[] | null}
  */
-export function readAgentTools(agentsDir, agentType) {
+/**
+ * Frontmatter text of an agent file, or null when missing/unreadable.
+ * @param {string | null | undefined} agentsDir
+ * @param {string} agentType
+ * @returns {string | null}
+ */
+export function readAgentFrontmatter(agentsDir, agentType) {
   if (!agentsDir) return null;
   const file = join(agentsDir, `${agentType}.md`);
   if (!existsSync(file)) return null;
@@ -146,8 +153,67 @@ export function readAgentTools(agentsDir, agentType) {
     return null;
   }
   const fm = /^---\s*\n([\s\S]*?)\n---/.exec(text);
+  return fm ? fm[1] : null;
+}
+
+/**
+ * Claude model tiers -> Muse models (maintainer mapping, 2026-11-15).
+ * Muse model ids are versioned; rev this table as the Muse catalogue revs.
+ */
+export const MUSE_MODEL_FOR_CLAUDE = {
+  opus: "muse-wonder-1.0",
+  sonnet: "muse-spark-1.3",
+  haiku: "muse-ember-1.0",
+};
+
+/**
+ * Map a Claude model pin to its Muse model: a bare tier ("opus"), a full
+ * Claude id containing a tier ("claude-opus-4-1"), or an existing Muse id
+ * (passed through). Returns null when nothing is recognizable.
+ * @param {unknown} model
+ * @returns {string | null}
+ */
+export function museModelForClaude(model) {
+  if (typeof model !== "string" || !model) return null;
+  const table = /** @type {Record<string, string>} */ (MUSE_MODEL_FOR_CLAUDE);
+  if (table[model]) return table[model];
+  if (model.startsWith("muse-")) return model;
+  for (const tier of Object.keys(table)) {
+    if (model.toLowerCase().includes(tier)) return table[tier] ?? null;
+  }
+  return null;
+}
+
+/**
+ * The `model:` frontmatter of an agent file, mapped to a Muse model.
+ * @param {string | null | undefined} agentsDir
+ * @param {string} agentType
+ * @returns {string | null}
+ */
+export function readAgentModel(agentsDir, agentType) {
+  const fm = readAgentFrontmatter(agentsDir, agentType);
   if (!fm) return null;
-  const line = fm[1].split("\n").find((l) => /^\s*tools\s*:/i.test(l));
+  const line = fm.split("\n").find((l) => /^\s*model\s*:/i.test(l));
+  if (!line) return null;
+  const raw = line
+    .slice(line.indexOf(":") + 1)
+    .trim()
+    .replace(/^["']|["']$/g, "");
+  return museModelForClaude(raw);
+}
+
+/**
+ * Read the `tools:` frontmatter list from an agent file
+ * (`<agentsDir>/<agentType>.md`). Returns null when the file is missing,
+ * unreadable, or names no tools.
+ * @param {string | null | undefined} agentsDir
+ * @param {string} agentType
+ * @returns {string[] | null}
+ */
+export function readAgentTools(agentsDir, agentType) {
+  const fm = readAgentFrontmatter(agentsDir, agentType);
+  if (!fm) return null;
+  const line = fm.split("\n").find((l) => /^\s*tools\s*:/i.test(l));
   if (!line) return null;
   const tools = line
     .slice(line.indexOf(":") + 1)
@@ -202,26 +268,49 @@ export function museAgentFileRole(file) {
  * short fallback role from museRoleFor.
  * @param {string[]} customTypes
  * @param {Record<string, string>} [agentFiles] agent type -> agent file path
+ * @param {Record<string, string>} [modelForType] agent type -> Muse model (from agent-file pins)
  * @returns {string}
  */
-export function museHelpers(customTypes, agentFiles = {}) {
+export function museHelpers(customTypes, agentFiles = {}, modelForType = {}) {
   const entries = customTypes.map((t) => {
     const file = agentFiles[t];
     const role = file ? museAgentFileRole(file) : museRoleFor(t);
     return `  ${JSON.stringify(t)}: ${JSON.stringify(role)},`;
   });
+  const modelEntries = Object.entries(modelForType).map(
+    ([t, m]) => `  ${JSON.stringify(t)}: ${JSON.stringify(m)},`,
+  );
   return [
     "// wfport:begin-helpers (converter-injected Muse shims — deleted on conversion back to Claude)",
     "// Muse port: agent resolves to an envelope { ref, data, ... } —",
     "// museResult unwraps to data, mapping errors/stalls (error_kind) to null",
     "// so callers hit the resume path instead of operating on empty values.",
     "// museDispatchArgs maps Claude-only agentTypes to general-purpose with the",
-    "// role prompt prepended, drops Claude-only model pins (the session",
-    "// route inherits), and sanitizes schemas via museSchema. Central choke",
-    "// point so dynamic option flows (spec.agentType, options.runnerType)",
+    "// role prompt prepended, maps Claude model pins to Muse models",
+    "// (MUSE_MODEL_FOR_CLAUDE; per-type pins from agent files in",
+    "// MUSE_MODEL_FOR_TYPE), and sanitizes schemas via museSchema. Central",
+    "// choke point so dynamic option flows (spec.agentType, options.runnerType)",
     "// are covered too.",
     "const MUSE_ROLE_FOR = {",
     ...entries,
+    "};",
+    "// Claude model tiers -> Muse models (maintainer mapping, 2026-11-15).",
+    `const MUSE_MODEL_FOR_CLAUDE = ${JSON.stringify(MUSE_MODEL_FOR_CLAUDE)};`,
+    "const MUSE_MODEL_FOR_TYPE = {",
+    ...modelEntries,
+    "};",
+    "const museModelFor = (m) => {",
+    '  if (typeof m !== "string" || !m) return null;',
+    "  if (MUSE_MODEL_FOR_CLAUDE[m]) return MUSE_MODEL_FOR_CLAUDE[m];",
+    '  if (m.startsWith("muse-")) return m;',
+    '  const tier = m.toLowerCase().includes("opus")',
+    '    ? "opus"',
+    '    : m.toLowerCase().includes("sonnet")',
+    '      ? "sonnet"',
+    '      : m.toLowerCase().includes("haiku")',
+    '        ? "haiku"',
+    "        : null;",
+    "  return tier ? MUSE_MODEL_FOR_CLAUDE[tier] : null;",
     "};",
     "// museSchema rebuilds a schema from only the keys the Muse runner",
     "// accepts (type/enum/required/properties/items), at any depth. It runs",
@@ -259,7 +348,13 @@ export function museHelpers(customTypes, agentFiles = {}) {
     "  }",
     "  const out = { ...(opts || {}) };",
     '  if (t !== "general-purpose" && t !== "workflow-subagent") out.agentType = "general-purpose";',
-    '  if ("model" in out) delete out.model;',
+    '  if ("model" in out) {',
+    "    const mappedModel = museModelFor(out.model);",
+    "    if (mappedModel) out.model = mappedModel;",
+    "    else delete out.model;",
+    "  } else if (MUSE_MODEL_FOR_TYPE[t]) {",
+    "    out.model = MUSE_MODEL_FOR_TYPE[t];",
+    "  }",
     '  if ("schema" in out) out.schema = museSchema(out.schema);',
     "  out.input = role ? `${role}\\n\\n${input}` : input;",
     "  return out;",
@@ -1235,6 +1330,10 @@ export const CLAUDE_TO_MUSE_TOOL_NAMES = {
   Bash: "bash",
   Glob: "search",
   Grep: "search",
+  TodoWrite: "write_todos",
+  WebFetch: "web_fetch",
+  WebSearch: "web_search",
+  NotebookRead: "read",
 };
 
 /**
@@ -1245,7 +1344,10 @@ export const CLAUDE_TO_MUSE_TOOL_NAMES = {
  * names makes tool-gap checks compare against names no child ever holds.
  * Prose strings that merely mention a tool are not entries and pass
  * through. `ToolSearch` and `mcp__*` entries have no Muse equivalent:
- * they stay, with a gap, rather than being silently dropped.
+ * as array elements they are dropped (with a gap — keeping them would
+ * make tool-gap checks chase tools no Muse child ever holds); as lone
+ * object values they stay, with the same gap, since removing a value
+ * would break the object.
  * @param {string} code
  * @param {Gap[]} gaps
  * @returns {string}
@@ -1258,6 +1360,8 @@ function mapToolInventories(code, gaps) {
   const mapped = new Map();
   /** @type {Map<string, number>} */
   const unmappable = new Map();
+  /** @type {{ litStart: number, litEnd: number }[]} */
+  const drops = [];
   let m;
   while ((m = re.exec(code)) !== null) {
     const name = m[1] ?? m[2] ?? "";
@@ -1282,8 +1386,12 @@ function mapToolInventories(code, gaps) {
         litEnd: m.index + m[0].length,
       });
       if (!mapped.has(name)) mapped.set(name, line);
-    } else if (!unmappable.has(name)) {
-      unmappable.set(name, line);
+    } else {
+      if (!unmappable.has(name)) unmappable.set(name, line);
+      // Array elements are dropped with their comma (below); a lone object
+      // value stays, since removing it would break the object.
+      if (prev === "[" || prev === ",")
+        drops.push({ litStart: m.index, litEnd: m.index + m[0].length });
     }
   }
   // Glob and Grep both map to "search": within one array, a second entry
@@ -1326,6 +1434,19 @@ function mapToolInventories(code, gaps) {
     if (key) seenInArray.add(key);
     ops.push({ start: e.start, end: e.end, muse: e.muse });
   }
+  for (const d of drops) {
+    let s = d.litStart;
+    let en = d.litEnd;
+    let p = s - 1;
+    while (p >= 0 && /\s/.test(code[p] ?? "")) p -= 1;
+    if (code[p] === ",") s = p;
+    else {
+      let q = en;
+      while (q < code.length && /\s/.test(code[q] ?? "")) q += 1;
+      if (code[q] === ",") en = q + 1;
+    }
+    ops.push({ start: s, end: en, muse: null });
+  }
   ops.sort((a, b) => b.start - a.start);
   for (const op of ops) {
     code = code.slice(0, op.start) + (op.muse ?? "") + code.slice(op.end);
@@ -1344,7 +1465,7 @@ function mapToolInventories(code, gaps) {
     gaps.push({
       kind: "tool-names",
       line,
-      detail: `${name} has no Muse equivalent — Muse children never hold it; remove it from tool inventories (or document the step as skipped) or tool-gap reporting will chase a gap that can never close`,
+      detail: `${name} has no Muse equivalent — dropped from tool inventory arrays (kept only as a lone object value); Muse children never hold it, so tool-gap reporting must not chase it`,
     });
   }
   return code;
@@ -1441,10 +1562,13 @@ function stripExports(code, gaps) {
 // Convert Claude Workflow source to Muse Workflow source + gap report.
 /**
  * @param {string} source
- * @param {{ inputName?: string, agentsDir?: string | null }} [options]
+ * @param {{ inputName?: string, agentsDir?: string | null, codexReviewScript?: string | null }} [options]
  * @returns {{ code: string, report: ConvertReport }}
  */
-export function convert(source, { inputName = "<input>", agentsDir = null } = {}) {
+export function convert(
+  source,
+  { inputName = "<input>", agentsDir = null, codexReviewScript = null } = {},
+) {
   /** @type {Gap[]} */
   const gaps = [];
   let code = source;
@@ -1468,6 +1592,22 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
 
   // Any other export is a preflight SyntaxError in the wrapped Muse body.
   code = stripExports(code, gaps);
+
+  // When the project carries a Muse-side Codex route, prompts ordering
+  // the GitHub MCP mention are rewritten to it (comment lines untouched).
+  if (codexReviewScript) {
+    code = code
+      .split("\n")
+      .map((line) =>
+        /^\s*\/\//.test(line)
+          ? line
+          : line.replaceAll(
+              "mcp__github__add_issue_comment",
+              `\`bun ${codexReviewScript} request <pr>\``,
+            ),
+      )
+      .join("\n");
+  }
 
   // agent(...) calls, rewritten right-to-left so offsets stay valid.
   // Matches inside comments or string/template text are skipped: the old
@@ -1512,9 +1652,13 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   ].sort();
   /** @type {Record<string, string>} */
   const agentFiles = {};
+  /** @type {Record<string, string>} */
+  const modelForType = {};
   for (const t of customTypes) {
     if (agentsDir && existsSync(join(agentsDir, `${t}.md`))) {
       agentFiles[t] = join(agentsDir, `${t}.md`);
+      const model = readAgentModel(agentsDir, t);
+      if (model) modelForType[t] = model;
     }
   }
   for (const l of found.literals) {
@@ -1564,6 +1708,7 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
       agentFile: agentsDir ? join(agentsDir, `${value}.md`) : null,
       agentFileExists: agentsDir ? existsSync(join(agentsDir, `${value}.md`)) : null,
       tools,
+      model: modelForType[value] ?? null,
       action: isReadOnlyTools(tools)
         ? `${base} — WARNING: the agent file's read-only tools restriction is lost (prompt-only, not enforced); see the tool-restriction gap`
         : base,
@@ -1573,13 +1718,14 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   // Every dispatch already routes through the choke points (mapping +
   // unwrap) — convertAgentCall emits that form directly.
 
-  // Claude-only model pins are dropped at runtime by museDispatchArgs.
+  // Model pins map at runtime via MUSE_MODEL_FOR_CLAUDE in the dispatch
+  // helper; unrecognized pins are dropped there (session route inherits).
   if (/(^|[^\w$])model\s*:/.test(codeOnly(source))) {
     gaps.push({
       kind: "model",
       line: 1,
       detail:
-        "Claude-only model pin(s) dropped at runtime (the session route inherits) — remove CITATION_AUDIT_MODEL-style constants by hand if desired",
+        "model pin(s) mapped at runtime (opus->muse-wonder-1.0, sonnet->muse-spark-1.3, haiku->muse-ember-1.0; agent-file pins via MUSE_MODEL_FOR_TYPE) — unrecognized pins are dropped; CITATION_AUDIT_MODEL-style constants still read as Claude tiers in the text but dispatch as Muse models",
     });
   }
 
@@ -1595,7 +1741,10 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
       mcpOrders.push({ tool: m[0], line: i + 1 });
     }
   });
+  const codexRouted =
+    !!codexReviewScript && mcpOrders.some((o) => o.tool === "mcp__github__add_issue_comment");
   for (const order of mcpOrders) {
+    if (codexRouted && order.tool === "mcp__github__add_issue_comment") continue;
     gaps.push({
       kind: "mcp-tool",
       line: order.line,
@@ -1605,6 +1754,13 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
         `Muse-side posting/collection route, or document an explicit skip before running.`,
     });
   }
+  if (codexRouted) {
+    gaps.push({
+      kind: "codex-mcp",
+      line: 1,
+      detail: `codex review round rewritten: prompts ordering mcp__github__add_issue_comment now route through \`bun ${codexReviewScript} request <pr>\` — verify the script posts as an account that can draw a review and that collection reads its report before relying on the round`,
+    });
+  }
 
   // Codex-review degradation: the @codex mention path (GitHub MCP write,
   // or the scripts/codex-review.ts fallback outside the child) has no Muse
@@ -1612,9 +1768,10 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   // posts outside the child, may post as a different account, and its
   // result may not be collected as a reviewable review.
   if (
-    (customTypes.includes("tl-runner") && /@codex|\bMCP\b/i.test(source)) ||
-    /codex-review(\.ts)?\b/i.test(source) ||
-    (/@codex\b/i.test(source) && mcpOrders.length > 0)
+    !codexRouted &&
+    ((customTypes.includes("tl-runner") && /@codex|\bMCP\b/i.test(source)) ||
+      /codex-review(\.ts)?\b/i.test(source) ||
+      (/@codex\b/i.test(source) && mcpOrders.length > 0))
   ) {
     gaps.push({
       kind: "codex-mcp",
@@ -1671,12 +1828,31 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
       line: 1,
       detail: `${calls.length} agent() call sites — a multi-round sweep exceeds the ~15-child guideline; chunk rounds across runs`,
     });
-  if (!/^\s*return\b/m.test(source))
+  if (!/^\s*return\b/m.test(source)) {
     gaps.push({
       kind: "return",
       line: 1,
       detail: "no top-level return — Muse expects the run to end with return { status, ref, text }",
     });
+  } else {
+    // A top-level object return without status: gains status: "ok" so the
+    // Muse terminal shape is present. Source fields ride along after it.
+    const retMasked = codeOnly(code);
+    const retMatch = /^return\s*\{/m.exec(retMasked);
+    if (retMatch) {
+      const openIdx = code.indexOf("{", retMatch.index);
+      const keys = parseSchemaEntries(code, openIdx).map((e) => e.key);
+      if (!keys.includes("status")) {
+        code = `${code.slice(0, openIdx + 1)} status: "ok",${code.slice(openIdx + 1)}`;
+        gaps.push({
+          kind: "return",
+          line: lineOf(code, retMatch.index),
+          detail:
+            'terminal return gained status: "ok" — replace it with the run\'s real outcome wherever the run can abort or fail; source fields follow it unchanged',
+        });
+      }
+    }
+  }
 
   // V1 body shape: header comments + injected shims, then the script
   // itself with top-level await/return. No wrapper function, no export,
@@ -1695,7 +1871,7 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   }
   headerLines.push("");
   const header = headerLines.join("\n");
-  const helpers = museHelpers(customTypes, agentFiles);
+  const helpers = museHelpers(customTypes, agentFiles, modelForType);
   const wrapped = `${header}${preserveBlock(strippedSchemas.preserved)}${helpers}\n${code.trimEnd()}\n`;
 
   const report = {

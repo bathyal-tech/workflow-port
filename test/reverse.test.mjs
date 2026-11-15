@@ -170,7 +170,8 @@ test("muse body->claude: choke unwrapped, shims stripped, meta restored", () => 
   assert.match(code, /export const meta = \{/);
   assert.match(code, /agent\("Do it", \{ agentType: "bg-fix", label: "first" \}\)/);
   assert.match(code, /parallel\(\[\(\) => agent\("A", \{ label: "a" \}\)\]\)/);
-  assert.match(code, /return \{ r, pair \};/);
+  // The Muse leg inserted status: "ok" for its terminal shape; it rides back.
+  assert.match(code, /return \{ status: "ok", r, pair \};/);
   // No wrapper gap (body shape recognized), no meta gap (carried meta restored).
   assert.ok(!report.gaps.some((g) => g.kind === "wrapper"));
   assert.ok(!report.gaps.some((g) => g.kind === "meta"));
