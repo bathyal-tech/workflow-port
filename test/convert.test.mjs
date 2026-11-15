@@ -195,6 +195,24 @@ test("dispatch sanitizes schemas at runtime, whatever built them", () => {
   assert.equal(plain.label, "y");
 });
 
+test("dispatch warns on an unknown agentType instead of mapping silently", () => {
+  /** @type {string[]} */
+  const logs = [];
+  const museDispatchArgs = new Function(
+    "log",
+    `${museHelpers(["known-type"])}\n; return museDispatchArgs;`,
+  )((/** @type {unknown} */ msg) => logs.push(String(msg)));
+  const out = museDispatchArgs("brief", { agentType: "mystery" });
+  assert.equal(out.agentType, "general-purpose");
+  assert.equal(out.input, "brief");
+  assert.equal(logs.length, 1);
+  assert.match(logs[0] ?? "", /unknown agentType "mystery"/);
+  // A known type dispatches with its role and no warning.
+  const known = museDispatchArgs("brief", { agentType: "known-type" });
+  assert.match(known.input, /known-type agent/);
+  assert.equal(logs.length, 1);
+});
+
 test("toil-shape: fragments, notes, titles, dynamic types, model pin, mcp", () => {
   const { code, report } = convert(toilShape, { inputName: "toil-shape.workflow.js" });
   // Choke points cover every dispatch, including the helper-defined ones.
@@ -238,6 +256,12 @@ test("read-only agent file tools are a blocking tool-restriction gap for muse", 
   });
   const gap = report.gaps.find((g) => g.kind === "tool-restriction");
   assert.ok(gap, "expected a tool-restriction gap");
+  // The generated file itself discloses the loss in its header, not just the report.
+  const { code } = convert(sample, {
+    inputName: "sample.workflow.js",
+    agentsDir: join(here, "fixtures", "agents"),
+  });
+  assert.match(code, /WARNING: .*read-only role .*prompt-only/);
   assert.match(gap.detail, /readonly-reviewer/);
   assert.match(gap.detail, /Read, Glob, Grep/);
   assert.match(gap.detail, /prompt-only|NOT enforced/);
@@ -298,7 +322,9 @@ test("tool inventories map Claude tool names to Muse names; mcp/ToolSearch flagg
   ].join("\n");
   const { code, report } = convert(src, { inputName: "tools.js" });
   // Whole-string inventory entries become Muse tool names.
-  assert.match(code, /"read", "write", "bash", "search", "search"/);
+  assert.match(code, /"read", "write", "bash", "search"/);
+  // Glob and Grep both map to search: the duplicate is dropped, not emitted.
+  assert.doesNotMatch(code, /"search", "search"/);
   assert.doesNotMatch(code, /"(Read|Write|Bash|Glob|Grep)"/);
   // Names with no Muse equivalent stay, but are reported, not silent.
   assert.match(code, /"ToolSearch"/);

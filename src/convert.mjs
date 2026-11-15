@@ -254,6 +254,9 @@ export function museHelpers(customTypes, agentFiles = {}) {
     "const museDispatchArgs = (input, opts) => {",
     '  const t = opts && typeof opts.agentType === "string" ? opts.agentType : "";',
     "  const role = MUSE_ROLE_FOR[t];",
+    '  if (t && !role && t !== "general-purpose" && t !== "workflow-subagent") {',
+    '    log(`museDispatchArgs: unknown agentType "${t}" — dispatching as general-purpose with no role prompt. Add it to MUSE_ROLE_FOR or fix the call site.`);',
+    "  }",
     "  const out = { ...(opts || {}) };",
     '  if (t !== "general-purpose" && t !== "workflow-subagent") out.agentType = "general-purpose";',
     '  if ("model" in out) delete out.model;',
@@ -1249,7 +1252,7 @@ export const CLAUDE_TO_MUSE_TOOL_NAMES = {
  */
 function mapToolInventories(code, gaps) {
   const re = /"([^"\n]*)"|'([^'\n]*)'/g;
-  /** @type {{ start: number, end: number, muse: string }[]} */
+  /** @type {{ start: number, end: number, muse: string, litStart: number, litEnd: number }[]} */
   const edits = [];
   /** @type {Map<string, number>} */
   const mapped = new Map();
@@ -1271,15 +1274,61 @@ function mapToolInventories(code, gaps) {
     if (!isEntry) continue;
     const line = lineOf(code, m.index);
     if (muse) {
-      edits.push({ start: m.index + 1, end: m.index + 1 + name.length, muse });
+      edits.push({
+        start: m.index + 1,
+        end: m.index + 1 + name.length,
+        muse,
+        litStart: m.index,
+        litEnd: m.index + m[0].length,
+      });
       if (!mapped.has(name)) mapped.set(name, line);
     } else if (!unmappable.has(name)) {
       unmappable.set(name, line);
     }
   }
-  for (let i = edits.length - 1; i >= 0; i -= 1) {
-    const e = /** @type {{ start: number, end: number, muse: string }} */ (edits[i]);
-    code = code.slice(0, e.start) + e.muse + code.slice(e.end);
+  // Glob and Grep both map to "search": within one array, a second entry
+  // landing on an already-emitted Muse name is dropped (with its comma),
+  // so list consumers like recordToolGaps never see a duplicate.
+  /** @type {{ start: number, end: number }[]} */
+  const arraySpans = [];
+  {
+    const masked = codeOnly(code);
+    const bracketRe = /\[/g;
+    let bm;
+    while ((bm = bracketRe.exec(masked)) !== null) {
+      const close = matchDelim(code, bm.index, "[", "]");
+      if (close > bm.index) arraySpans.push({ start: bm.index, end: close });
+    }
+  }
+  /** @type {Set<string>} */
+  const seenInArray = new Set();
+  /** @type {{ start: number, end: number, muse: string | null }[]} */
+  const ops = [];
+  for (const e of edits) {
+    const span = arraySpans
+      .filter((s) => s.start < e.litStart && s.end >= e.litEnd)
+      .sort((a, b) => b.start - a.start)[0];
+    const key = span ? `${span.start}:${e.muse}` : null;
+    if (key && seenInArray.has(key)) {
+      let s = e.litStart;
+      let en = e.litEnd;
+      let p = s - 1;
+      while (p >= 0 && /\s/.test(code[p] ?? "")) p -= 1;
+      if (code[p] === ",") s = p;
+      else {
+        let q = en;
+        while (q < code.length && /\s/.test(code[q] ?? "")) q += 1;
+        if (code[q] === ",") en = q + 1;
+      }
+      ops.push({ start: s, end: en, muse: null });
+      continue;
+    }
+    if (key) seenInArray.add(key);
+    ops.push({ start: e.start, end: e.end, muse: e.muse });
+  }
+  ops.sort((a, b) => b.start - a.start);
+  for (const op of ops) {
+    code = code.slice(0, op.start) + (op.muse ?? "") + code.slice(op.end);
   }
   if (mapped.size) {
     const pairs = [...mapped.keys()]
@@ -1632,11 +1681,20 @@ export function convert(source, { inputName = "<input>", agentsDir = null } = {}
   // V1 body shape: header comments + injected shims, then the script
   // itself with top-level await/return. No wrapper function, no export,
   // no host object — the runner wraps this text as a function body.
-  const header = [
+  const headerLines = [
     `// Converted from Claude Workflow${metaName ? ` "${metaName}"` : ""} by workflow-port.`,
     "// Review every TODO/gap in the conversion report before running.",
-    "",
-  ].join("\n");
+  ];
+  if (gaps.some((g) => g.kind === "tool-restriction")) {
+    headerLines.push(
+      "// WARNING: a read-only role in this port is prompt-only in Muse —",
+      "// general-purpose children get full tools, so the restriction the",
+      "// agent file enforces in Claude is NOT enforced here. Do not run",
+      "// read-only gates through this file until that is addressed.",
+    );
+  }
+  headerLines.push("");
+  const header = headerLines.join("\n");
   const helpers = museHelpers(customTypes, agentFiles);
   const wrapped = `${header}${preserveBlock(strippedSchemas.preserved)}${helpers}\n${code.trimEnd()}\n`;
 
