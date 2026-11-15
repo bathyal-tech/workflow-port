@@ -29,7 +29,7 @@ test("mechanical mapping: V1 body shape with bare globals", () => {
   assert.match(code, /log\("starting"\)/);
   assert.match(code, /parallel\(\[/);
   assert.match(code, /schema: RESULT_SCHEMA/);
-  assert.match(code, /^return \{ first, pair \};/m);
+  assert.match(code, /^return \{ status: "ok", first, pair \};/m);
 });
 
 test("custom agentType is mapped at runtime and reported", () => {
@@ -195,6 +195,78 @@ test("dispatch sanitizes schemas at runtime, whatever built them", () => {
   assert.equal(plain.label, "y");
 });
 
+test("dispatch warns on an unknown agentType instead of mapping silently", () => {
+  /** @type {string[]} */
+  const logs = [];
+  const museDispatchArgs = new Function(
+    "log",
+    `${museHelpers(["known-type"])}\n; return museDispatchArgs;`,
+  )((/** @type {unknown} */ msg) => logs.push(String(msg)));
+  const out = museDispatchArgs("brief", { agentType: "mystery" });
+  assert.equal(out.agentType, "general-purpose");
+  assert.equal(out.input, "brief");
+  assert.equal(logs.length, 1);
+  assert.match(logs[0] ?? "", /unknown agentType "mystery"/);
+  // A known type dispatches with its role and no warning.
+  const known = museDispatchArgs("brief", { agentType: "known-type" });
+  assert.match(known.input, /known-type agent/);
+  assert.equal(logs.length, 1);
+});
+
+test("model pins map to Muse models at dispatch, per-type pins from agent files", () => {
+  const museDispatchArgs = new Function(
+    "log",
+    `${museHelpers(["tl-reflect"], {}, { "tl-reflect": "muse-wonder-1.0" })}\n; return museDispatchArgs;`,
+  )(() => {});
+  assert.equal(museDispatchArgs("b", { model: "sonnet" }).model, "muse-spark-1.3");
+  assert.equal(museDispatchArgs("b", { model: "claude-opus-4-1" }).model, "muse-wonder-1.0");
+  assert.equal(museDispatchArgs("b", { model: "muse-ember-1.0" }).model, "muse-ember-1.0");
+  assert.equal(museDispatchArgs("b", { agentType: "tl-reflect" }).model, "muse-wonder-1.0");
+  assert.equal("model" in museDispatchArgs("b", { model: "gpt-x" }), false);
+  // Agent-file model: frontmatter reaches the helper via convert().
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const r = await agent("hi", { agentType: "modeled-type", label: "x" });',
+    "return { r };",
+  ].join("\n");
+  const { code, report } = convert(src, {
+    inputName: "modeled.js",
+    agentsDir: join(here, "fixtures", "agents"),
+  });
+  assert.match(code, /"modeled-type": "muse-wonder-1\.0"/);
+  assert.equal(report.agentTypes.find((a) => a.value === "modeled-type")?.model, "muse-wonder-1.0");
+});
+
+test("codex MCP mention rewrites to the project script when it exists", () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const r = await agent("Post the mention with mcp__github__add_issue_comment, never via the MCP web UI.", { label: "codex-request" });',
+    "return { r };",
+  ].join("\n");
+  const plain = convert(src, { inputName: "codex.js" });
+  assert.match(plain.code, /mcp__github__add_issue_comment/);
+  const routed = convert(src, {
+    inputName: "codex.js",
+    codexReviewScript: "scripts/codex-review.ts",
+  });
+  assert.doesNotMatch(routed.code, /mcp__github__add_issue_comment/);
+  assert.match(routed.code, /bun scripts\/codex-review\.ts request/);
+  assert.ok(routed.report.gaps.some((g) => g.kind === "codex-mcp" && /rewritten/.test(g.detail)));
+});
+
+test("extended tool names map and terminal return gains status", () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const AGENT_TOOLS = ["TodoWrite", "WebFetch", "WebSearch", "NotebookRead"];',
+    'const r = await agent("hi", { label: "x" });',
+    "return { r };",
+  ].join("\n");
+  const { code, report } = convert(src, { inputName: "tools2.js" });
+  assert.match(code, /\["write_todos", "web_fetch", "web_search", "read"\]/);
+  assert.match(code, /return \{ status: "ok", r \};/);
+  assert.ok(report.gaps.some((g) => g.kind === "return" && /status/.test(g.detail)));
+});
+
 test("toil-shape: fragments, notes, titles, dynamic types, model pin, mcp", () => {
   const { code, report } = convert(toilShape, { inputName: "toil-shape.workflow.js" });
   // Choke points cover every dispatch, including the helper-defined ones.
@@ -238,6 +310,12 @@ test("read-only agent file tools are a blocking tool-restriction gap for muse", 
   });
   const gap = report.gaps.find((g) => g.kind === "tool-restriction");
   assert.ok(gap, "expected a tool-restriction gap");
+  // The generated file itself discloses the loss in its header, not just the report.
+  const { code } = convert(sample, {
+    inputName: "sample.workflow.js",
+    agentsDir: join(here, "fixtures", "agents"),
+  });
+  assert.match(code, /WARNING: .*read-only role .*prompt-only/);
   assert.match(gap.detail, /readonly-reviewer/);
   assert.match(gap.detail, /Read, Glob, Grep/);
   assert.match(gap.detail, /prompt-only|NOT enforced/);
@@ -298,10 +376,13 @@ test("tool inventories map Claude tool names to Muse names; mcp/ToolSearch flagg
   ].join("\n");
   const { code, report } = convert(src, { inputName: "tools.js" });
   // Whole-string inventory entries become Muse tool names.
-  assert.match(code, /"read", "write", "bash", "search", "search"/);
+  assert.match(code, /"read", "write", "bash", "search"/);
+  // Glob and Grep both map to search: the duplicate is dropped, not emitted.
+  assert.doesNotMatch(code, /"search", "search"/);
   assert.doesNotMatch(code, /"(Read|Write|Bash|Glob|Grep)"/);
-  // Names with no Muse equivalent stay, but are reported, not silent.
-  assert.match(code, /"ToolSearch"/);
+  // Names with no Muse equivalent are dropped from inventory arrays (and
+  // reported), so tool-gap checks never chase tools no Muse child holds.
+  assert.doesNotMatch(code, /"ToolSearch"|"mcp__github__add_issue_comment"/);
   const gap = report.gaps.find((g) => g.kind === "tool-names" && /ToolSearch/.test(g.detail));
   assert.ok(gap, "expected a tool-names gap for ToolSearch");
   assert.match(gap.detail, /no Muse equivalent/);

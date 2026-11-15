@@ -10,7 +10,7 @@
 // otherwise. Converted source goes to --out or stdout; the gap report
 // (JSON) goes to --report or stderr.
 // Exit 0 = converted; exit 1 = usage/config error; exit 2 = gaps need review.
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { VERSION } from "../src/version.mjs";
 import { maybeSelfUpdate } from "../src/self-update.mjs";
@@ -258,6 +258,17 @@ try {
 
 const agentsDir = agentsDirOpt ?? join(dirname(/** @type {string} */ (input)), "..", "agents");
 
+// A Muse-side Codex route in the project under conversion (the usual
+// <root>/.claude/workflows/<name>.js layout, or scripts/ under the cwd)
+// lets the converter rewrite GitHub MCP mention orders to it.
+const codexReviewScript = [
+  join(dirname(/** @type {string} */ (input)), "..", "..", "scripts", "codex-review.ts"),
+  join(dirname(/** @type {string} */ (input)), "..", "scripts", "codex-review.ts"),
+  join(process.cwd(), "scripts", "codex-review.ts"),
+].some((p) => existsSync(p))
+  ? "scripts/codex-review.ts"
+  : null;
+
 /** @type {string} */
 let code;
 /** @type {Record<string, unknown>} */
@@ -266,6 +277,7 @@ if (source === "claude" && target === "muse") {
   const out = convert(sourceText, {
     inputName: /** @type {string} */ (input),
     agentsDir,
+    codexReviewScript,
   });
   code = out.code;
   report = { ...out.report, source, target };
