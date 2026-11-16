@@ -258,7 +258,7 @@ export function convertMuseToClaude(source, { inputName = "<input>", agentsDir =
     code =
       "const museClassifyStatus = (values) => {\n" +
       "  const bad = (v) => {\n" +
-      "    if (!v) return true;\n" +
+      "    if (v === null || v === undefined) return true;\n" +
       "    if (Array.isArray(v)) return v.some(bad);\n" +
       '    if (typeof v === "object")\n' +
       '      return v.status === "needs-fix" || v.status === "abort" || v.status === "error" || v.status === "failed";\n' +

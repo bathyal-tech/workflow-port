@@ -350,7 +350,7 @@ export function museHelpers(
     "// top-level result objects are inspected one level deep.",
     "const museClassifyStatus = (values) => {",
     "  const bad = (v) => {",
-    "    if (!v) return true;",
+    "    if (v === null || v === undefined) return true;",
     "    if (Array.isArray(v)) return v.some(bad);",
     '    if (typeof v === "object")',
     '      return v.status === "needs-fix" || v.status === "abort" || v.status === "error" || v.status === "failed";',
@@ -370,8 +370,12 @@ export function museHelpers(
     "  const role = MUSE_ROLE_FOR[t];",
     "  if (MUSE_READONLY_TYPES.includes(t)) {",
     '    const allowed = typeof args !== "undefined" && args != null && args.allowUnenforcedReadonly === true;',
+    '    const strict = typeof args !== "undefined" && args != null && args.strictReadonlyGate === true;',
+    "    if (!allowed && strict) {",
+    "      throw new Error(`wfport: ${t} is read-only in Claude (agent-file tools), but Muse general-purpose is not tool-restricted — refusing to dispatch it unenforced (args.strictReadonlyGate). Pass args.allowUnenforcedReadonly = true to run it prompt-only anyway, or keep this leg on a host that enforces the cap.`);",
+    "    }",
     "    if (!allowed) {",
-    "      throw new Error(`wfport: ${t} is read-only in Claude (agent-file tools), but Muse general-purpose is not tool-restricted — refusing to dispatch it unenforced. Pass args.allowUnenforcedReadonly = true to run it prompt-only anyway, or keep this leg on a host that enforces the cap.`);",
+    "      log(`wfport: ${t} is read-only in Claude but prompt-only in Muse (not tool-restricted) — dispatching unenforced. Pass args.allowUnenforcedReadonly = true to silence this, or args.strictReadonlyGate = true to refuse such dispatches.`);",
     "    }",
     "  }",
     '  if (t && !role && t !== "general-purpose" && t !== "workflow-subagent") {',
@@ -1431,6 +1435,23 @@ export const CLAUDE_TO_MUSE_TOOL_NAMES = {
  * @returns {string}
  */
 function mapToolInventories(code, gaps) {
+  // Spans of TOOLS-named const values: inside those, any single-token name
+  // wfport cannot map (DesignSync, project-specific tools, …) is treated
+  // as unmappable rather than copied through — copying it would claim a
+  // Muse child holds a tool by that name.
+  /** @type {{ start: number, end: number }[]} */
+  const toolConstSpans = [];
+  {
+    const declRe = /\b(?:const|let|var)\s+[A-Za-z_$][\w$]*tools[\w$]*\s*=\s*/gi;
+    let dm;
+    while ((dm = declRe.exec(code)) !== null) {
+      const openIdx = dm.index + dm[0].length;
+      const ch = code[openIdx];
+      if (ch !== "{" && ch !== "[") continue;
+      const closeIdx = matchDelim(code, openIdx, ch, ch === "{" ? "}" : "]");
+      if (closeIdx > openIdx) toolConstSpans.push({ start: openIdx, end: closeIdx });
+    }
+  }
   const re = /"([^"\n]*)"|'([^'\n]*)'/g;
   /** @type {{ start: number, end: number, muse: string, litStart: number, litEnd: number }[]} */
   const edits = [];
@@ -1440,12 +1461,18 @@ function mapToolInventories(code, gaps) {
   const unmappable = new Map();
   /** @type {{ litStart: number, litEnd: number }[]} */
   const drops = [];
+  /** @type {RegExpExecArray | null} */
   let m;
   while ((m = re.exec(code)) !== null) {
     const name = m[1] ?? m[2] ?? "";
     const muse = /** @type {Record<string, string>} */ (CLAUDE_TO_MUSE_TOOL_NAMES)[name];
+    const mIndex = m.index;
+    const inToolsConst = toolConstSpans.some((s) => mIndex > s.start && mIndex < s.end);
     const isUnmappable =
-      name === "ToolSearch" || name.startsWith("mcp__") || CLAUDE_TOOLS_NO_MUSE.has(name);
+      name === "ToolSearch" ||
+      name.startsWith("mcp__") ||
+      CLAUDE_TOOLS_NO_MUSE.has(name) ||
+      (inToolsConst && /^[A-Za-z][\w-]*$/.test(name) && !name.startsWith("muse."));
     if (!muse && !isUnmappable) continue;
     let p = m.index - 1;
     while (p >= 0 && /\s/.test(code[p] ?? "")) p -= 1;
@@ -1827,6 +1854,24 @@ export function convert(
   const maintainer = takeMaintainerNotes(code);
   code = maintainer.code;
 
+  // A project may declare its Codex route in the source:
+  // `// wfport:codex-route script-only` (or mcp-first). Only a declared
+  // override rewrites prompts — wfport never assumes the session's gh
+  // identity on its own (see the codex-mcp gap).
+  const codexDirective = /\/\/\s*wfport:codex-route\s+(script-only|mcp-first)\b/.exec(source);
+  const codexRoute = codexDirective ? codexDirective[1] : null;
+  if (codexRoute === "script-only") {
+    const script = codexReviewScript ?? "scripts/codex-review.ts";
+    code = code
+      .split("\n")
+      .map((line) =>
+        /^\s*\/\//.test(line)
+          ? line
+          : line.replaceAll("mcp__github__add_issue_comment", `bun ${script} request <pr>`),
+      )
+      .join("\n");
+  }
+
   // agent(...) calls, rewritten right-to-left so offsets stay valid.
   // Matches inside comments or string/template text are skipped: the old
   // regex rewrote `` `await agent()` `` inside doc comments into garbage.
@@ -1915,8 +1960,8 @@ export function convert(
         detail:
           `${l.value}: agent file limits tools to ${tools.join(", ")} — Muse ` +
           `general-purpose has no tool restriction, so this becomes prompt-only and NOT enforced ` +
-          `(the child can still edit, commit, and push). Dispatch of this type is gated at ` +
-          `runtime (args.allowUnenforcedReadonly). Do not run read-only gates through this ` +
+          `(the child can still edit, commit, and push). Dispatch of this type warns at ` +
+          `runtime; args.strictReadonlyGate = true makes it refuse. Do not run read-only gates through this ` +
           `port: enforce it Muse-side (a per-call tools allowlist), or isolate the review leg ` +
           `in a disposable worktree without push credentials and abort if the tree or HEAD ` +
           `changes, or keep that leg on a host that enforces capability.`,
@@ -1996,17 +2041,37 @@ export function convert(
   });
   const codexScriptKnown =
     !!codexReviewScript && mcpOrders.some((o) => o.tool === "mcp__github__add_issue_comment");
+  // One gap per distinct MCP tool, with a site count — an inventory plus
+  // per-step prompts can otherwise restate the same tool dozens of times.
+  /** @type {Map<string, { line: number, count: number }>} */
+  const mcpByTool = new Map();
   for (const order of mcpOrders) {
+    if (codexRoute === "script-only" && order.tool === "mcp__github__add_issue_comment") continue;
+    const hit = mcpByTool.get(order.tool);
+    if (hit) hit.count += 1;
+    else mcpByTool.set(order.tool, { line: order.line, count: 1 });
+  }
+  for (const [tool, hit] of mcpByTool) {
     gaps.push({
       kind: "mcp-tool",
-      line: order.line,
+      line: hit.line,
       detail:
-        `${order.tool} — Muse children have no MCP tools, so this order cannot run as ` +
+        `${tool} (${hit.count} site${hit.count === 1 ? "" : "s"}) — Muse children have no MCP tools, so this order cannot run as ` +
         `written and the step it drives will silently never happen. Replace it with a ` +
         `Muse-side posting/collection route, or document an explicit skip before running.`,
     });
   }
-  if (codexScriptKnown) {
+  if (codexRoute) {
+    gaps.push({
+      kind: "codex-mcp",
+      line: 1,
+      detail:
+        codexRoute === "script-only"
+          ? `codex review round follows the project override (// wfport:codex-route script-only): prompts ordering mcp__github__add_issue_comment were rewritten to bun ${codexReviewScript ?? "scripts/codex-review.ts"} request <pr> — the project has declared that its authenticated gh identity is the one that should post; wfport applied the declaration, it did not infer it`
+          : "codex review round follows the project override (// wfport:codex-route mcp-first): MCP-first prompt text retained by declaration — the project has declared the connector account should post",
+    });
+  }
+  if (codexScriptKnown && !codexRoute) {
     gaps.push({
       kind: "codex-mcp",
       line: 1,
@@ -2021,6 +2086,7 @@ export function convert(
   // result may not be collected as a reviewable review.
   if (
     !codexScriptKnown &&
+    !codexRoute &&
     ((customTypes.includes("tl-runner") && /@codex|\bMCP\b/i.test(source)) ||
       /codex-review(\.ts)?\b/i.test(source) ||
       (/@codex\b/i.test(source) && mcpOrders.length > 0))
@@ -2141,8 +2207,9 @@ export function convert(
       `// WARNING: agent tool caps are prompt-only in this port for: ${restrictedTypes.join(", ")} —`,
       "// general-purpose children inherit the full session toolset, so the",
       "// caps (and any MCP grants) in their agent files are NOT enforced",
-      "// here. Read-only dispatch is gated: pass args.allowUnenforcedReadonly",
-      "// = true to run it anyway. See the tool-restriction gaps in the report.",
+      "// here. Read-only dispatch warns at dispatch; pass",
+      "// args.strictReadonlyGate = true to refuse it, or",
+      "// args.allowUnenforcedReadonly = true to silence the warning.",
     );
   }
   headerLines.push("");
