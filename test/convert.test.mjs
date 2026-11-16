@@ -391,18 +391,27 @@ test("read-only agent file tools are a blocking tool-restriction gap for muse", 
     inputName: "sample.workflow.js",
     agentsDir: join(here, "fixtures", "agents"),
   });
-  assert.match(code, /WARNING: .*read-only role .*prompt-only/);
+  assert.match(
+    code,
+    /WARNING: agent tool caps are prompt-only in this port for: readonly-reviewer/,
+  );
   assert.match(gap.detail, /readonly-reviewer/);
   assert.match(gap.detail, /Read, Glob, Grep/);
   assert.match(gap.detail, /prompt-only|NOT enforced/);
   const entry = report.agentTypes.find((a) => a.value === "readonly-reviewer");
   assert.deepEqual(entry?.tools, ["Read", "Glob", "Grep"]);
-  // A write-capable agent file (Read, Write) is not a read-only restriction.
+  // A write-capable agent file (Read, Write) is not read-only gated, but
+  // its cap is still a named tool-restriction gap (all caps are, now).
   const { report: rep2 } = convert(toilRounds, {
     inputName: "toil-rounds.workflow.js",
     agentsDir: join(here, "fixtures", "agents"),
   });
-  assert.ok(!rep2.gaps.some((g) => g.kind === "tool-restriction" && /tl-reporter/.test(g.detail)));
+  const capGap = rep2.gaps.find(
+    (g) => g.kind === "tool-restriction" && /tl-reporter/.test(g.detail),
+  );
+  assert.ok(capGap, "expected a tool-restriction gap for tl-reporter");
+  assert.match(capGap.detail, /cap is not enforced/);
+  assert.doesNotMatch(capGap.detail, /allowUnenforcedReadonly/);
 });
 
 test("existing agent files are pointed at, not collapsed to one-line roles", () => {
@@ -499,6 +508,80 @@ test("tool inventories map Claude tool names to Muse names; mcp/ToolSearch flagg
     { inputName: "prose.js" },
   );
   assert.match(prose.code, /Use the Read tool first, then Bash\./);
+});
+
+test("conditional-required descriptions and stripped constraints are named gaps", () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    "const SELECT_SCHEMA = {",
+    '  type: "object",',
+    '  required: ["status"],',
+    "  properties: {",
+    '    status: { type: "string", enum: ["picked", "none"] },',
+    '    labels: { type: "array", items: { type: "string" }, description: "Required when status is picked." },',
+    '    specIssue: { type: "integer", minimum: 1 },',
+    '    specRevision: { type: "string", pattern: "^[a-f0-9]{64}$" },',
+    "  },",
+    "};",
+    'const r = await agent("Pick.", { label: "select", schema: SELECT_SCHEMA });',
+    "return { r };",
+  ].join("\n");
+  const { report } = convert(src, { inputName: "conditional.js" });
+  const cond = report.gaps.find((g) => g.kind === "conditional-required");
+  assert.ok(cond, "expected a conditional-required gap");
+  assert.match(cond.detail, /labels/);
+  assert.match(cond.detail, /Required when status is picked/);
+  assert.ok(
+    report.gaps.some((g) => g.kind === "schema-constraint" && /specIssue.*minimum/.test(g.detail)),
+  );
+  assert.ok(
+    report.gaps.some(
+      (g) => g.kind === "schema-constraint" && /specRevision.*pattern/.test(g.detail),
+    ),
+  );
+});
+
+test("every agent-file tool cap is a named gap, not only the reviewer's", () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const a = await agent("Work.", { agentType: "modeled-type", label: "a" });',
+    'const b = await agent("Post.", { agentType: "mcp-type", label: "b" });',
+    "return { a };",
+  ].join("\n");
+  const { report } = convert(src, {
+    inputName: "caps.js",
+    agentsDir: join(here, "fixtures", "agents"),
+  });
+  // modeled-type caps at Read, Write (write-capable, still a cap).
+  assert.ok(
+    report.gaps.some((g) => g.kind === "tool-restriction" && /modeled-type/.test(g.detail)),
+  );
+  // mcp-type's granted MCP tool is lost in Muse.
+  assert.ok(
+    report.gaps.some(
+      (g) =>
+        g.kind === "tool-restriction" &&
+        /mcp-type/.test(g.detail) &&
+        /mcp__github__add_issue_comment/.test(g.detail),
+    ),
+  );
+});
+
+test("read-only dispatch is gated behind an explicit run arg", () => {
+  const make = (/** @type {unknown} */ argsVal) =>
+    new Function(
+      "log",
+      "args",
+      `${museHelpers(["readonly-reviewer"], {}, {}, {}, ["readonly-reviewer"])}\n; return museDispatchArgs;`,
+    )(() => {}, argsVal);
+  assert.throws(
+    () => make({})("brief", { agentType: "readonly-reviewer" }),
+    /allowUnenforcedReadonly/,
+  );
+  const out = make({ allowUnenforcedReadonly: true })("brief", {
+    agentType: "readonly-reviewer",
+  });
+  assert.equal(out.agentType, "general-purpose");
 });
 
 test("banned APIs count only in code, with real lines", () => {

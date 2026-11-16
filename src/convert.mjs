@@ -270,9 +270,16 @@ export function museAgentFileRole(file, summary = "") {
  * @param {Record<string, string>} [agentFiles] agent type -> agent file path
  * @param {Record<string, string>} [modelForType] agent type -> Muse model (from agent-file pins)
  * @param {Record<string, string>} [roleNotes] agent type -> extra instruction appended to its role
+ * @param {string[]} [readonlyTypes] types whose read-only cap is gated at dispatch
  * @returns {string}
  */
-export function museHelpers(customTypes, agentFiles = {}, modelForType = {}, roleNotes = {}) {
+export function museHelpers(
+  customTypes,
+  agentFiles = {},
+  modelForType = {},
+  roleNotes = {},
+  readonlyTypes = [],
+) {
   const entries = customTypes.map((t) => {
     const file = agentFiles[t];
     let role = file ? museAgentFileRole(file, museRoleFor(t)) : museRoleFor(t);
@@ -357,9 +364,16 @@ export function museHelpers(customTypes, agentFiles = {}, modelForType = {}, rol
     '  if (typeof res === "object" && "data" in res) return res.data ?? null;',
     "  return res;",
     "};",
+    `const MUSE_READONLY_TYPES = ${JSON.stringify(readonlyTypes)};`,
     "const museDispatchArgs = (input, opts) => {",
     '  const t = opts && typeof opts.agentType === "string" ? opts.agentType : "";',
     "  const role = MUSE_ROLE_FOR[t];",
+    "  if (MUSE_READONLY_TYPES.includes(t)) {",
+    '    const allowed = typeof args !== "undefined" && args != null && args.allowUnenforcedReadonly === true;',
+    "    if (!allowed) {",
+    "      throw new Error(`wfport: ${t} is read-only in Claude (agent-file tools), but Muse general-purpose is not tool-restricted — refusing to dispatch it unenforced. Pass args.allowUnenforcedReadonly = true to run it prompt-only anyway, or keep this leg on a host that enforces the cap.`);",
+    "    }",
+    "  }",
     '  if (t && !role && t !== "general-purpose" && t !== "workflow-subagent") {',
     '    log(`museDispatchArgs: unknown agentType "${t}" — dispatching as general-purpose with no role prompt. Add it to MUSE_ROLE_FOR or fix the call site.`);',
     "  }",
@@ -1270,7 +1284,30 @@ function stripSchemas(code, gaps) {
   for (let i = consts.length - 1; i >= 0; i -= 1) {
     const c = consts[i];
     const literal = code.slice(c.openIdx, c.closeIdx + 1);
-    preserved.unshift(...collectPreservedSchemaKeys(literal, c.name));
+    const entries = collectPreservedSchemaKeys(literal, c.name);
+    preserved.unshift(...entries);
+    // Two losses the aggregate schema gap would bury: conditional
+    // requirements carried only by a description ("Required when status
+    // is picked" — Muse schemas cannot express conditionals, and the
+    // preserve block is comments the runner ignores, so nothing enforces
+    // them), and rejected constraints (minimum/pattern/…) whose removal
+    // silently weakens validation. Name each one.
+    for (const e of entries) {
+      const field = e.path.length ? e.path.join(".") : c.name;
+      if (e.key === "description" && /^"?\s*required\s+(when|if|for)\b/i.test(e.valueSrc)) {
+        gaps.push({
+          kind: "conditional-required",
+          line: lineOf(code, c.openIdx),
+          detail: `${c.name}.${field}: ${e.valueSrc} — this conditional requirement lived only in the description, which Muse inline schemas cannot express; it is demoted to optional in the port. Compensate by hand: inline the requirement in the dispatch prompt, or promote the field to required with an empty-value convention for the other cases`,
+        });
+      } else if (SCHEMA_KEYWORDS_BAD.includes(e.key)) {
+        gaps.push({
+          kind: "schema-constraint",
+          line: lineOf(code, c.openIdx),
+          detail: `${c.name}.${field}: ${e.key} (${e.valueSrc}) is stripped for Muse — values the Claude schema rejected now pass and fail later, downstream. Add an explicit check where the value is consumed if that validation matters`,
+        });
+      }
+    }
     const { text, removed } = stripSchemaProps(literal);
     const total = removed.description + removed.title + removed.notes + removed.constraints;
     if (total === 0) continue;
@@ -1840,6 +1877,8 @@ export function convert(
   const modelForType = {};
   /** @type {Record<string, string>} */
   const roleNotes = {};
+  /** @type {string[]} */
+  const readonlyTypes = [];
   for (const t of customTypes) {
     if (agentsDir && existsSync(join(agentsDir, `${t}.md`))) {
       agentFiles[t] = join(agentsDir, `${t}.md`);
@@ -1852,6 +1891,7 @@ export function convert(
     if (isReadOnlyTools(readAgentTools(agentsDir, t))) {
       roleNotes[t] =
         "In this dialect that is an instruction, not a capability limit, and it binds exactly as if it were one.";
+      readonlyTypes.push(t);
     }
   }
   for (const l of found.literals) {
@@ -1868,17 +1908,37 @@ export function convert(
     // in Claude; Muse general-purpose children get full tools, so the
     // inlined "edit nothing" role prompt is prompt-only and NOT enforced.
     const tools = readAgentTools(agentsDir, l.value);
-    if (isReadOnlyTools(tools)) {
+    if (tools && isReadOnlyTools(tools)) {
       gaps.push({
         kind: "tool-restriction",
         line: l.line,
         detail:
-          `${l.value}: agent file limits tools to ${(tools ?? []).join(", ")} — Muse ` +
+          `${l.value}: agent file limits tools to ${tools.join(", ")} — Muse ` +
           `general-purpose has no tool restriction, so this becomes prompt-only and NOT enforced ` +
-          `(the child can still edit, commit, and push). Do not run read-only gates through this ` +
+          `(the child can still edit, commit, and push). Dispatch of this type is gated at ` +
+          `runtime (args.allowUnenforcedReadonly). Do not run read-only gates through this ` +
           `port: enforce it Muse-side (a per-call tools allowlist), or isolate the review leg ` +
           `in a disposable worktree without push credentials and abort if the tree or HEAD ` +
           `changes, or keep that leg on a host that enforces capability.`,
+      });
+    } else if (tools) {
+      // Every agent-file tools list is a cap (and possibly a grant of MCP
+      // tools), not just the read-only reviewer's. Muse general-purpose
+      // inherits the full session toolset, so the cap is lost in both
+      // directions: the child may hold tools the file forbids, and lacks
+      // any mcp__* tools the file grants.
+      const mcpTools = tools.filter((t) => t.startsWith("mcp__"));
+      gaps.push({
+        kind: "tool-restriction",
+        line: l.line,
+        detail:
+          `${l.value}: agent file limits tools to ${tools.join(", ")} — Muse ` +
+          `general-purpose inherits the full session toolset, so this cap is not enforced ` +
+          `(prompt and agent-file text only)` +
+          (mcpTools.length
+            ? `; the file's MCP tools (${mcpTools.join(", ")}) are lost outright — Muse children have no MCP tools`
+            : "") +
+          `. Do not treat AGENT_TOOLS as an enforced allowlist for this type.`,
       });
     }
   }
@@ -2068,17 +2128,26 @@ export function convert(
     `// Converted from Claude Workflow${metaName ? ` "${metaName}"` : ""} by workflow-port.`,
     "// Review every TODO/gap in the conversion report before running.",
   ];
-  if (gaps.some((g) => g.kind === "tool-restriction")) {
+  const restrictedTypes = [
+    ...new Set(
+      gaps
+        .filter((g) => g.kind === "tool-restriction")
+        .map((g) => /^([^:]+):/.exec(g.detail)?.[1] ?? "")
+        .filter(Boolean),
+    ),
+  ];
+  if (restrictedTypes.length) {
     headerLines.push(
-      "// WARNING: a read-only role in this port is prompt-only in Muse —",
-      "// general-purpose children get full tools, so the restriction the",
-      "// agent file enforces in Claude is NOT enforced here. Do not run",
-      "// read-only gates through this file until that is addressed.",
+      `// WARNING: agent tool caps are prompt-only in this port for: ${restrictedTypes.join(", ")} —`,
+      "// general-purpose children inherit the full session toolset, so the",
+      "// caps (and any MCP grants) in their agent files are NOT enforced",
+      "// here. Read-only dispatch is gated: pass args.allowUnenforcedReadonly",
+      "// = true to run it anyway. See the tool-restriction gaps in the report.",
     );
   }
   headerLines.push("");
   const header = headerLines.join("\n");
-  const helpers = museHelpers(customTypes, agentFiles, modelForType, roleNotes);
+  const helpers = museHelpers(customTypes, agentFiles, modelForType, roleNotes, readonlyTypes);
   const wrapped = trimTrailingWhitespace(
     `${header}${preserveBlock(strippedSchemas.preserved)}${maintainer.notes}${helpers}\n${code.trimEnd()}\n`,
   );
