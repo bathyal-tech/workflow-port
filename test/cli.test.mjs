@@ -33,6 +33,19 @@ function runCli(args, options = {}) {
   return { status: proc.status, stdout: proc.stdout, stderr: proc.stderr };
 }
 
+test("cli formats generated JS with the project oxfmt when present", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wfport-cli-"));
+  const report = join(dir, "report.json");
+  const proc = spawnSync(process.execPath, ["bin/cli.mjs", fixture, "--report", report], {
+    cwd: root,
+    encoding: "utf8",
+    env: { ...process.env, WFPORT_NO_UPDATE_CHECK: "1" },
+  });
+  // oxfmt expands the one-line model table; unformatted output keeps it inline.
+  assert.match(proc.stdout, /const MUSE_MODEL_FOR_CLAUDE = \{\n/);
+  assert.equal(JSON.parse(readFileSync(report, "utf8")).formatted, true);
+});
+
 test("default is claude->muse with stdout and stderr report", () => {
   const dir = mkdtempSync(join(tmpdir(), "wfport-cli-"));
   const report = join(dir, "report.json");

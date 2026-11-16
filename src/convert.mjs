@@ -254,11 +254,11 @@ export function museRoleFor(name) {
  * @param {string} file
  * @returns {string}
  */
-export function museAgentFileRole(file) {
-  return (
-    `Read ${file} and follow it where it does not conflict with this brief. ` +
-    `That file is your full role contract; the brief below is the task.`
-  );
+export function museAgentFileRole(file, summary = "") {
+  const base =
+    `Read ${file} first and follow it where it does not conflict with this brief. ` +
+    `That file is your full role contract; the brief below is the task.`;
+  return summary ? `${base} ${summary}` : base;
 }
 
 /**
@@ -274,7 +274,7 @@ export function museAgentFileRole(file) {
 export function museHelpers(customTypes, agentFiles = {}, modelForType = {}) {
   const entries = customTypes.map((t) => {
     const file = agentFiles[t];
-    const role = file ? museAgentFileRole(file) : museRoleFor(t);
+    const role = file ? museAgentFileRole(file, museRoleFor(t)) : museRoleFor(t);
     return `  ${JSON.stringify(t)}: ${JSON.stringify(role)},`;
   });
   const modelEntries = Object.entries(modelForType).map(
@@ -333,6 +333,20 @@ export function museHelpers(customTypes, agentFiles = {}, modelForType = {}) {
     "    }",
     "  }",
     "  return out;",
+    "};",
+    "// museClassifyStatus derives the Muse terminal status from the values",
+    "// being returned: needs-fix when any is missing (museResult maps errors",
+    "// to null) or reports needs-fix/abort/error/failed, else ok. Arrays and",
+    "// top-level result objects are inspected one level deep.",
+    "const museClassifyStatus = (values) => {",
+    "  const bad = (v) => {",
+    "    if (!v) return true;",
+    "    if (Array.isArray(v)) return v.some(bad);",
+    '    if (typeof v === "object")',
+    '      return v.status === "needs-fix" || v.status === "abort" || v.status === "error" || v.status === "failed";',
+    "    return false;",
+    "  };",
+    '  return values.some(bad) ? "needs-fix" : "ok";',
     "};",
     "const museResult = (res) => {",
     "  if (res === null || res === undefined) return null;",
@@ -1347,23 +1361,24 @@ export const CLAUDE_TOOLS_NO_MUSE = new Set([
 
 /** Claude tool names with a Muse equivalent, for tool inventories. */
 export const CLAUDE_TO_MUSE_TOOL_NAMES = {
-  Read: "read",
-  Write: "write",
-  Edit: "edit",
-  Bash: "bash",
-  Glob: "search",
-  Grep: "search",
-  TodoWrite: "write_todos",
-  WebFetch: "web_fetch",
-  WebSearch: "web_search",
-  NotebookRead: "read",
+  Read: "muse.read_file",
+  Write: "muse.write_file",
+  Edit: "muse.edit_file",
+  Bash: "muse.bash",
+  shell: "muse.bash",
+  Glob: "muse.search",
+  Grep: "muse.search",
+  TodoWrite: "muse.write_todos",
+  WebFetch: "muse.web_fetch",
+  WebSearch: "muse.web_search",
+  NotebookRead: "muse.read_file",
 };
 
 /**
  * Map Claude tool names to Muse names where a whole string literal is a
  * tool-inventory entry (an array element or object value, e.g.
  * `AGENT_TOOLS = { runner: ["Read", "Bash"] }`). Muse children report
- * tools as bash/read/write/edit/search, so an inventory left in Claude
+ * tools as muse.bash/muse.read_file/muse.search, so an inventory left in Claude
  * names makes tool-gap checks compare against names no child ever holds.
  * Prose strings that merely mention a tool are not entries and pass
  * through. `ToolSearch` and `mcp__*` entries have no Muse equivalent:
@@ -1747,22 +1762,6 @@ export function convert(
   // Any other export is a preflight SyntaxError in the wrapped Muse body.
   code = stripExports(code, gaps);
 
-  // When the project carries a Muse-side Codex route, prompts ordering
-  // the GitHub MCP mention are rewritten to it (comment lines untouched).
-  if (codexReviewScript) {
-    code = code
-      .split("\n")
-      .map((line) =>
-        /^\s*\/\//.test(line)
-          ? line
-          : line.replaceAll(
-              "mcp__github__add_issue_comment",
-              `bun ${codexReviewScript} request <pr>`,
-            ),
-      )
-      .join("\n");
-  }
-
   // agent(...) calls, rewritten right-to-left so offsets stay valid.
   // Matches inside comments or string/template text are skipped: the old
   // regex rewrote `` `await agent()` `` inside doc comments into garbage.
@@ -1898,10 +1897,9 @@ export function convert(
       mcpOrders.push({ tool: m[0], line: i + 1 });
     }
   });
-  const codexRouted =
+  const codexScriptKnown =
     !!codexReviewScript && mcpOrders.some((o) => o.tool === "mcp__github__add_issue_comment");
   for (const order of mcpOrders) {
-    if (codexRouted && order.tool === "mcp__github__add_issue_comment") continue;
     gaps.push({
       kind: "mcp-tool",
       line: order.line,
@@ -1911,11 +1909,11 @@ export function convert(
         `Muse-side posting/collection route, or document an explicit skip before running.`,
     });
   }
-  if (codexRouted) {
+  if (codexScriptKnown) {
     gaps.push({
       kind: "codex-mcp",
       line: 1,
-      detail: `codex review round rewritten: prompts ordering mcp__github__add_issue_comment now route through bun ${codexReviewScript} request — but account identity is a premise, not a converted fact: the MCP path posts as the connector account (e.g. claude[bot]) while the script posts as the locally authenticated gh account, and wfport has only swapped the tool token, not converted an MCP-first flow to script-only. Decide which authenticated identity this project wants, confirm it can draw a review, and rewrite the flow to match before relying on the round`,
+      detail: `codex review round is a gap, not a converted strategy: this project carries ${codexReviewScript} as one candidate route, but neither the source nor wfport can know the session's authenticated gh identity — the MCP path posts as the connector account (e.g. claude[bot]) while the script posts as whoever gh is authenticated as, and an MCP-first two-call flow premised on one identity silently becomes wrong under the other. No prompt was rewritten. Decide which identity this session actually has, then rewrite the round to MCP-first or script-only to match before running`,
     });
   }
 
@@ -1925,7 +1923,7 @@ export function convert(
   // posts outside the child, may post as a different account, and its
   // result may not be collected as a reviewable review.
   if (
-    !codexRouted &&
+    !codexScriptKnown &&
     ((customTypes.includes("tl-runner") && /@codex|\bMCP\b/i.test(source)) ||
       /codex-review(\.ts)?\b/i.test(source) ||
       (/@codex\b/i.test(source) && mcpOrders.length > 0))
@@ -2010,12 +2008,17 @@ export function convert(
             "terminal return spreads a value that may already carry status — no hardcoded status inserted; confirm the Muse terminal shape by hand",
         });
       } else if (!keys.includes("status")) {
-        code = `${code.slice(0, openIdx + 1)} status: "ok",${code.slice(openIdx + 1)}`;
+        const values = splitTopLevel(inner).map((part) => {
+          const trimmed = part.trim();
+          const kv = /^[A-Za-z_$][\w$]*\s*:\s*/.exec(trimmed);
+          return kv ? trimmed.slice(kv[0].length) : trimmed;
+        });
+        code = `${code.slice(0, openIdx + 1)} status: museClassifyStatus([${values.join(", ")}]),${code.slice(openIdx + 1)}`;
         gaps.push({
           kind: "return",
           line: lineOf(code, retMatch.index),
           detail:
-            'terminal return gained status: "ok" — replace it with the run\'s real outcome wherever the run can abort or fail; source fields follow it unchanged',
+            "terminal return gained status: museClassifyStatus([...returned values]) — needs-fix when any value is missing or reports needs-fix/abort/error/failed; confirm that classification matches the run's real outcomes",
         });
       }
     }

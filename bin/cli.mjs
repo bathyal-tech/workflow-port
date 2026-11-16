@@ -11,6 +11,7 @@
 // (JSON) goes to --report or stderr.
 // Exit 0 = converted; exit 1 = usage/config error; exit 2 = gaps need review.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { VERSION } from "../src/version.mjs";
 import { maybeSelfUpdate } from "../src/self-update.mjs";
@@ -260,7 +261,7 @@ const agentsDir = agentsDirOpt ?? join(dirname(/** @type {string} */ (input)), "
 
 // A Muse-side Codex route in the project under conversion (the usual
 // <root>/.claude/workflows/<name>.js layout, or scripts/ under the cwd)
-// lets the converter rewrite GitHub MCP mention orders to it.
+// lets the converter name it as a candidate route in the Codex gap.
 const codexReviewScript = [
   join(dirname(/** @type {string} */ (input)), "..", "..", "scripts", "codex-review.ts"),
   join(dirname(/** @type {string} */ (input)), "..", "scripts", "codex-review.ts"),
@@ -358,6 +359,47 @@ if (source === "claude" && target === "muse") {
 function writeOutputFile(file, content) {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, content);
+}
+
+/**
+ * Format generated JS with the project's oxfmt when one is discoverable
+ * (project node_modules or PATH), via stdin so nothing is written twice.
+ * Converter output should pass the target project's `oxfmt --check`
+ * instead of failing it on rewrapped lines the hand port had formatted.
+ * Unavailable or failing formatter: keep the unformatted code.
+ * @param {string} text
+ * @param {string} filepath
+ * @returns {{ text: string, formatted: boolean }}
+ */
+function formatWithOxfmt(text, filepath) {
+  const inputDir = dirname(/** @type {string} */ (input));
+  const candidates = [
+    join(process.cwd(), "node_modules", ".bin", "oxfmt"),
+    join(inputDir, "..", "..", "node_modules", ".bin", "oxfmt"),
+    join(inputDir, "..", "node_modules", ".bin", "oxfmt"),
+    "oxfmt",
+  ];
+  for (const candidate of candidates) {
+    try {
+      const proc = spawnSync(candidate, ["--stdin-filepath", filepath], {
+        input: text,
+        encoding: "utf8",
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      if (proc.status === 0 && proc.stdout) return { text: proc.stdout, formatted: true };
+    } catch {
+      // Candidate missing or unusable — try the next one.
+    }
+  }
+  return { text, formatted: false };
+}
+
+if (target !== "grok") {
+  const formatted = formatWithOxfmt(code, outFile ?? "wfport-output.mjs");
+  code = formatted.text;
+  report.formatted = formatted.formatted;
+} else {
+  report.formatted = false;
 }
 
 if (outFile) writeOutputFile(outFile, code);

@@ -664,8 +664,8 @@ export function verifyMuse(source, { agentsDir = null } = {}) {
         severity: "warning",
         code: "W_TOOL_NAMES",
         line: 1,
-        message: `Claude tool names in a tool inventory (${[...toolNames].join(", ")}) — Muse children report tools as bash/read/write/edit/search`,
-        hint: "Map inventories to Muse tool names (Read->read, Write->write, Edit->edit, Bash->bash, Glob/Grep->search) and drop ToolSearch/mcp__* entries, or tool-gap reporting will be wrong.",
+        message: `Claude tool names in a tool inventory (${[...toolNames].join(", ")}) — Muse children report tools as muse.bash, muse.read_file, muse.write_file, muse.edit_file, muse.search`,
+        hint: "Map inventories to Muse tool names (Read->muse.read_file, Write->muse.write_file, Edit->muse.edit_file, Bash->muse.bash, Glob/Grep->muse.search) and drop ToolSearch/mcp__* entries, or tool-gap reporting will be wrong.",
       });
     }
   }

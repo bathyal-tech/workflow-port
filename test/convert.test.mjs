@@ -29,7 +29,7 @@ test("mechanical mapping: V1 body shape with bare globals", () => {
   assert.match(code, /log\("starting"\)/);
   assert.match(code, /parallel\(\[/);
   assert.match(code, /schema: RESULT_SCHEMA/);
-  assert.match(code, /^return \{ status: "ok", first, pair \};/m);
+  assert.match(code, /^return \{ status: museClassifyStatus\(\[first, pair\]\), first, pair \};/m);
 });
 
 test("custom agentType is mapped at runtime and reported", () => {
@@ -237,7 +237,7 @@ test("model pins map to Muse models at dispatch, per-type pins from agent files"
   assert.equal(report.agentTypes.find((a) => a.value === "modeled-type")?.model, "muse-wonder-1.0");
 });
 
-test("codex MCP mention rewrites to the project script when it exists", () => {
+test("codex MCP mention stays a gap even when the project script exists", () => {
   const src = [
     'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
     'const r = await agent("Post the mention with mcp__github__add_issue_comment, never via the MCP web UI.", { label: "codex-request" });',
@@ -249,21 +249,23 @@ test("codex MCP mention rewrites to the project script when it exists", () => {
     inputName: "codex.js",
     codexReviewScript: "scripts/codex-review.ts",
   });
-  assert.doesNotMatch(routed.code, /mcp__github__add_issue_comment/);
-  assert.match(routed.code, /bun scripts\/codex-review\.ts request/);
-  // No backticks are injected: prompts are often template literals, where a
-  // stray backtick would close the literal and break preflight parsing.
-  assert.doesNotMatch(routed.code, /`bun scripts/);
-  assert.ok(routed.report.gaps.some((g) => g.kind === "codex-mcp" && /rewritten/.test(g.detail)));
-  // The account identity premise is disclosed as a gap, not baked in.
+  // Neither wfport nor the source can know the session's gh identity, so
+  // no strategy is baked into prompts: the MCP order stays, flagged.
+  assert.match(routed.code, /mcp__github__add_issue_comment/);
+  assert.doesNotMatch(routed.code, /bun scripts\/codex-review\.ts request/);
   assert.ok(
     routed.report.gaps.some(
       (g) => g.kind === "codex-mcp" && /identity|authenticated/.test(g.detail),
     ),
   );
+  assert.ok(
+    routed.report.gaps.some(
+      (g) => g.kind === "codex-mcp" && /scripts\/codex-review\.ts/.test(g.detail),
+    ),
+  );
 });
 
-test("template-literal prompts survive the codex rewrite and still compile", async () => {
+test("template-literal prompts survive conversion and still compile", async () => {
   const src = [
     'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
     "const r = await agent(`Post the mention with mcp__github__add_issue_comment for ${pr}.`, { label: 'x' });",
@@ -327,8 +329,11 @@ test("extended tool names map and terminal return gains status", () => {
     "return { r };",
   ].join("\n");
   const { code, report } = convert(src, { inputName: "tools2.js" });
-  assert.match(code, /\["write_todos", "web_fetch", "web_search", "read"\]/);
-  assert.match(code, /return \{ status: "ok", r \};/);
+  assert.match(
+    code,
+    /\["muse\.write_todos", "muse\.web_fetch", "muse\.web_search", "muse\.read_file"\]/,
+  );
+  assert.match(code, /return \{ status: museClassifyStatus\(\[r\]\), r \};/);
   assert.ok(report.gaps.some((g) => g.kind === "return" && /status/.test(g.detail)));
 });
 
@@ -399,8 +404,9 @@ test("existing agent files are pointed at, not collapsed to one-line roles", () 
     inputName: "sample.workflow.js",
     agentsDir: join(here, "fixtures", "agents"),
   });
-  // readonly-reviewer.md exists in the fixtures dir: pointer, not the short role.
-  assert.match(code, /"readonly-reviewer": "Read .*readonly-reviewer\.md and follow it/);
+  // readonly-reviewer.md exists: pointer plus the one-line contract summary.
+  assert.match(code, /"readonly-reviewer": "Read .*readonly-reviewer\.md first and follow it/);
+  assert.match(code, /follow it[^"]*You are a read-only reviewer/);
   assert.doesNotMatch(code, /"readonly-reviewer": "You are a read-only reviewer/);
   // bg-fix has no agent file: the short fallback role stays.
   assert.match(code, /"bg-fix": "You are a bg-fix agent/);
@@ -441,9 +447,9 @@ test("tool inventories map Claude tool names to Muse names; mcp/ToolSearch flagg
   ].join("\n");
   const { code, report } = convert(src, { inputName: "tools.js" });
   // Whole-string inventory entries become Muse tool names.
-  assert.match(code, /"read", "write", "bash", "search"/);
-  // Glob and Grep both map to search: the duplicate is dropped, not emitted.
-  assert.doesNotMatch(code, /"search", "search"/);
+  assert.match(code, /"muse\.read_file", "muse\.write_file", "muse\.bash", "muse\.search"/);
+  // Glob and Grep both map to muse.search: the duplicate is dropped.
+  assert.doesNotMatch(code, /"muse\.search", "muse\.search"/);
   assert.doesNotMatch(code, /"(Read|Write|Bash|Glob|Grep)"/);
   // Names with no Muse equivalent are dropped from inventory arrays (and
   // reported), so tool-gap checks never chase tools no Muse child holds.
@@ -451,7 +457,9 @@ test("tool inventories map Claude tool names to Muse names; mcp/ToolSearch flagg
   const gap = report.gaps.find((g) => g.kind === "tool-names" && /ToolSearch/.test(g.detail));
   assert.ok(gap, "expected a tool-names gap for ToolSearch");
   assert.match(gap.detail, /no Muse equivalent/);
-  assert.ok(report.gaps.some((g) => g.kind === "tool-names" && /Read->read/.test(g.detail)));
+  assert.ok(
+    report.gaps.some((g) => g.kind === "tool-names" && /Read->muse\.read_file/.test(g.detail)),
+  );
   // Prose mentioning a tool is not an inventory entry and is left alone.
   const prose = convert(
     'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };\nconst r = await agent("Use the Read tool first, then Bash.", { label: "x" });\nreturn { r };\n',

@@ -251,6 +251,23 @@ export function convertMuseToClaude(source, { inputName = "<input>", agentsDir =
   }
 
   code = stripMuseHelpers(code);
+  // museClassifyStatus is plain JS, not a Muse shim: if the terminal
+  // return still calls it, keep its definition or the Claude output
+  // would reference a name the helper strip just deleted.
+  if (/museClassifyStatus\s*\(/.test(code) && !/const museClassifyStatus\s*=/.test(code)) {
+    code =
+      "const museClassifyStatus = (values) => {\n" +
+      "  const bad = (v) => {\n" +
+      "    if (!v) return true;\n" +
+      "    if (Array.isArray(v)) return v.some(bad);\n" +
+      '    if (typeof v === "object")\n' +
+      '      return v.status === "needs-fix" || v.status === "abort" || v.status === "error" || v.status === "failed";\n' +
+      "    return false;\n" +
+      "  };\n" +
+      '  return values.some(bad) ? "needs-fix" : "ok";\n' +
+      "};\n" +
+      code;
+  }
 
   // A carried Claude meta (`const meta /* Muse: ... */ =`, left by a
   // Claude -> Muse run) becomes the export again instead of a TODO stub.
