@@ -567,21 +567,84 @@ test("every agent-file tool cap is a named gap, not only the reviewer's", () => 
   );
 });
 
-test("read-only dispatch is gated behind an explicit run arg", () => {
+test("museClassifyStatus only treats missing or failed outcomes as needs-fix", () => {
+  const museClassifyStatus = new Function(`${museHelpers([])}\n; return museClassifyStatus;`)();
+  // Healthy: falsy primitives (0, false, "") and skipped strings are fine.
+  assert.equal(
+    museClassifyStatus([{ status: "ok" }, [{ status: "ok" }], "skipped", 0, false, ""]),
+    "ok",
+  );
+  assert.equal(museClassifyStatus([null]), "needs-fix");
+  assert.equal(museClassifyStatus([undefined]), "needs-fix");
+  assert.equal(museClassifyStatus([[{ status: "needs-fix" }]]), "needs-fix");
+  assert.equal(museClassifyStatus([{ status: "abort" }]), "needs-fix");
+});
+
+test("codex route can be declared by a project override directive", () => {
+  const src = [
+    "// wfport:codex-route script-only",
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const r = await agent("Post the mention with mcp__github__add_issue_comment.", { label: "codex-request" });',
+    "return { r };",
+  ].join("\n");
+  const { code, report } = convert(src, {
+    inputName: "codex-override.js",
+    codexReviewScript: "scripts/codex-review.ts",
+  });
+  assert.doesNotMatch(code, /mcp__github__add_issue_comment/);
+  assert.match(code, /bun scripts\/codex-review\.ts request/);
+  assert.ok(report.gaps.some((g) => g.kind === "codex-mcp" && /project override/.test(g.detail)));
+});
+
+test("repeated MCP orders dedupe to one gap per tool", () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const a = await agent("Use mcp__mem0__search_memories first.", { label: "a" });',
+    'const b = await agent("Use mcp__mem0__search_memories again.", { label: "b" });',
+    "return { a };",
+  ].join("\n");
+  const { report } = convert(src, { inputName: "mcp-dedupe.js" });
+  const hits = report.gaps.filter(
+    (g) => g.kind === "mcp-tool" && /mcp__mem0__search_memories/.test(g.detail),
+  );
+  assert.equal(hits.length, 1);
+  assert.match(hits[0]?.detail ?? "", /2 sites/);
+});
+
+test("unmapped names inside a TOOLS inventory drop instead of leaking", () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const AGENT_TOOLS = ["Read", "DesignSync", "SomethingCustom"];',
+    'const r = await agent("hi", { label: "x" });',
+    "return { r };",
+  ].join("\n");
+  const { code, report } = convert(src, { inputName: "tools-leak.js" });
+  assert.doesNotMatch(code, /"DesignSync"|"SomethingCustom"/);
+  assert.ok(report.gaps.some((g) => g.kind === "tool-names" && /DesignSync/.test(g.detail)));
+});
+
+test("read-only dispatch warns by default and only throws when strict", () => {
+  /** @type {string[]} */
+  const logs = [];
   const make = (/** @type {unknown} */ argsVal) =>
     new Function(
       "log",
       "args",
       `${museHelpers(["readonly-reviewer"], {}, {}, {}, ["readonly-reviewer"])}\n; return museDispatchArgs;`,
-    )(() => {}, argsVal);
-  assert.throws(
-    () => make({})("brief", { agentType: "readonly-reviewer" }),
-    /allowUnenforcedReadonly/,
-  );
-  const out = make({ allowUnenforcedReadonly: true })("brief", {
-    agentType: "readonly-reviewer",
-  });
+    )((/** @type {unknown} */ m) => logs.push(String(m)), argsVal);
+  // Default: dispatch proceeds, with a loud warning (fork-compatible).
+  const out = make({})("brief", { agentType: "readonly-reviewer" });
   assert.equal(out.agentType, "general-purpose");
+  assert.ok(logs.some((l) => /prompt-only/.test(l)));
+  // Strict: the caller can turn the warning into a refusal.
+  assert.throws(
+    () => make({ strictReadonlyGate: true })("brief", { agentType: "readonly-reviewer" }),
+    /strictReadonlyGate|allowUnenforcedReadonly/,
+  );
+  // Explicit opt-in silences the warning.
+  const before = logs.length;
+  make({ allowUnenforcedReadonly: true })("brief", { agentType: "readonly-reviewer" });
+  assert.equal(logs.length, before);
 });
 
 test("banned APIs count only in code, with real lines", () => {
