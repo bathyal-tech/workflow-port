@@ -255,9 +255,9 @@ export function museRoleFor(name) {
  * @returns {string}
  */
 export function museAgentFileRole(file, summary = "") {
-  const base =
-    `Read ${file} first and follow it where it does not conflict with this brief. ` +
-    `That file is your full role contract; the brief below is the task.`;
+  // Pointer plus the source-derived summary only — wfport converts role
+  // text, it does not author new role prose.
+  const base = `Read ${file} first and follow it where it does not conflict with this brief.`;
   return summary ? `${base} ${summary}` : base;
 }
 
@@ -269,12 +269,15 @@ export function museAgentFileRole(file, summary = "") {
  * @param {string[]} customTypes
  * @param {Record<string, string>} [agentFiles] agent type -> agent file path
  * @param {Record<string, string>} [modelForType] agent type -> Muse model (from agent-file pins)
+ * @param {Record<string, string>} [roleNotes] agent type -> extra instruction appended to its role
  * @returns {string}
  */
-export function museHelpers(customTypes, agentFiles = {}, modelForType = {}) {
+export function museHelpers(customTypes, agentFiles = {}, modelForType = {}, roleNotes = {}) {
   const entries = customTypes.map((t) => {
     const file = agentFiles[t];
-    const role = file ? museAgentFileRole(file, museRoleFor(t)) : museRoleFor(t);
+    let role = file ? museAgentFileRole(file, museRoleFor(t)) : museRoleFor(t);
+    const note = roleNotes[t];
+    if (note) role = `${role} ${note}`;
     return `  ${JSON.stringify(t)}: ${JSON.stringify(role)},`;
   });
   const modelEntries = Object.entries(modelForType).map(
@@ -1497,7 +1500,7 @@ function mapToolInventories(code, gaps) {
     gaps.push({
       kind: "tool-names",
       line: [...mapped.values()][0] ?? 1,
-      detail: `tool inventory names mapped to Muse equivalents (${pairs}) — Muse children report tools under these names, so tool-gap checks must compare against them`,
+      detail: `tool inventory names mapped to Muse equivalents (${pairs}) — ruling: these lists are the Claude agent files' carried requirements, not a claim about what a Muse child holds; Muse children inherit the full session toolset, so use the mapped list only to check required tools are available, never as a per-type allowlist`,
     });
   }
   for (const [name, line] of unmappable) {
@@ -1728,6 +1731,27 @@ function trimTrailingWhitespace(code) {
   return out.join("");
 }
 
+/**
+ * Extract a `// wfport:maintainer-notes begin … end` comment block, so it
+ * can be re-emitted at a defined place in the output header (alongside
+ * the wfport:preserve block) instead of wherever it sat in the source.
+ * Maintainer fork notes live here; wfport carries them, never edits them.
+ * @param {string} code
+ * @returns {{ notes: string, code: string }}
+ */
+function takeMaintainerNotes(code) {
+  const lines = code.split("\n");
+  const begin = lines.findIndex((l) => /^\/\/ wfport:maintainer-notes begin\s*$/.test(l));
+  if (begin < 0) return { notes: "", code };
+  const end = lines.findIndex(
+    (l, i) => i > begin && /^\/\/ wfport:maintainer-notes end\s*$/.test(l),
+  );
+  if (end < 0) return { notes: "", code };
+  const notes = `${lines.slice(begin, end + 1).join("\n")}\n`;
+  const rest = [...lines.slice(0, begin), ...lines.slice(end + 1)].join("\n");
+  return { notes, code: rest };
+}
+
 // Convert Claude Workflow source to Muse Workflow source + gap report.
 /**
  * @param {string} source
@@ -1761,6 +1785,10 @@ export function convert(
 
   // Any other export is a preflight SyntaxError in the wrapped Muse body.
   code = stripExports(code, gaps);
+
+  // Maintainer fork notes get a defined place in the output header.
+  const maintainer = takeMaintainerNotes(code);
+  code = maintainer.code;
 
   // agent(...) calls, rewritten right-to-left so offsets stay valid.
   // Matches inside comments or string/template text are skipped: the old
@@ -1810,11 +1838,20 @@ export function convert(
   const agentFiles = {};
   /** @type {Record<string, string>} */
   const modelForType = {};
+  /** @type {Record<string, string>} */
+  const roleNotes = {};
   for (const t of customTypes) {
     if (agentsDir && existsSync(join(agentsDir, `${t}.md`))) {
       agentFiles[t] = join(agentsDir, `${t}.md`);
       const model = readAgentModel(agentsDir, t);
       if (model) modelForType[t] = model;
+    }
+    // Read-only roles keep the hand port's binds-exactly instruction: the
+    // restriction is unenforced in Muse, and the prompt should say so
+    // at the dispatch, not only in the report.
+    if (isReadOnlyTools(readAgentTools(agentsDir, t))) {
+      roleNotes[t] =
+        "In this dialect that is an instruction, not a capability limit, and it binds exactly as if it were one.";
     }
   }
   for (const l of found.literals) {
@@ -1913,7 +1950,7 @@ export function convert(
     gaps.push({
       kind: "codex-mcp",
       line: 1,
-      detail: `codex review round is a gap, not a converted strategy: this project carries ${codexReviewScript} as one candidate route, but neither the source nor wfport can know the session's authenticated gh identity — the MCP path posts as the connector account (e.g. claude[bot]) while the script posts as whoever gh is authenticated as, and an MCP-first two-call flow premised on one identity silently becomes wrong under the other. No prompt was rewritten. Decide which identity this session actually has, then rewrite the round to MCP-first or script-only to match before running`,
+      detail: `codex review round is a gap, not a converted strategy: this project carries ${codexReviewScript} as one candidate route, but neither the source nor wfport can know the session's authenticated gh identity — the MCP path posts as the connector account (e.g. claude[bot]) while the script posts as whoever gh is authenticated as, and an MCP-first two-call flow premised on one identity silently becomes wrong under the other. No prompt was rewritten. Candidate variants: Variant A (MCP-first) keeps the source prompt text and posts as the connector account; Variant B (script-only) replaces the mention order with bun ${codexReviewScript} request <pr> and drops the MCP flow, posting as the authenticated gh account. Decide which identity this session actually has and apply one variant before running`,
     });
   }
 
@@ -2041,9 +2078,9 @@ export function convert(
   }
   headerLines.push("");
   const header = headerLines.join("\n");
-  const helpers = museHelpers(customTypes, agentFiles, modelForType);
+  const helpers = museHelpers(customTypes, agentFiles, modelForType, roleNotes);
   const wrapped = trimTrailingWhitespace(
-    `${header}${preserveBlock(strippedSchemas.preserved)}${helpers}\n${code.trimEnd()}\n`,
+    `${header}${preserveBlock(strippedSchemas.preserved)}${maintainer.notes}${helpers}\n${code.trimEnd()}\n`,
   );
 
   const report = {

@@ -263,6 +263,12 @@ test("codex MCP mention stays a gap even when the project script exists", () => 
       (g) => g.kind === "codex-mcp" && /scripts\/codex-review\.ts/.test(g.detail),
     ),
   );
+  // Both candidate prompt variants are named so the chooser sees them.
+  assert.ok(
+    routed.report.gaps.some(
+      (g) => g.kind === "codex-mcp" && /Variant A/.test(g.detail) && /Variant B/.test(g.detail),
+    ),
+  );
 });
 
 test("template-literal prompts survive conversion and still compile", async () => {
@@ -407,11 +413,31 @@ test("existing agent files are pointed at, not collapsed to one-line roles", () 
   // readonly-reviewer.md exists: pointer plus the one-line contract summary.
   assert.match(code, /"readonly-reviewer": "Read .*readonly-reviewer\.md first and follow it/);
   assert.match(code, /follow it[^"]*You are a read-only reviewer/);
+  // No invented role prose: the pointer plus the source-derived summary only.
+  assert.doesNotMatch(code, /full role contract/);
+  // Read-only roles carry the binds-exactly instruction (hand-port wording).
+  assert.match(code, /binds exactly as if it were one/);
   assert.doesNotMatch(code, /"readonly-reviewer": "You are a read-only reviewer/);
   // bg-fix has no agent file: the short fallback role stays.
   assert.match(code, /"bg-fix": "You are a bg-fix agent/);
   const entry = report.agentTypes.find((a) => a.value === "readonly-reviewer");
   assert.match(entry?.action ?? "", /points at/);
+});
+
+test("maintainer-notes blocks are carried through conversion verbatim", () => {
+  const src = [
+    "// wfport:maintainer-notes begin",
+    "// Fork note: the Codex round is script-only in this project.",
+    "// wfport:maintainer-notes end",
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const r = await agent("hi", { label: "x" });',
+    "return { r };",
+  ].join("\n");
+  const { code } = convert(src, { inputName: "notes.js" });
+  assert.match(
+    code,
+    /\/\/ wfport:maintainer-notes begin\n\/\/ Fork note: the Codex round is script-only in this project\.\n\/\/ wfport:maintainer-notes end/,
+  );
 });
 
 test("mcp__ tool orders in prompts are flagged for muse children", () => {
@@ -459,6 +485,13 @@ test("tool inventories map Claude tool names to Muse names; mcp/ToolSearch flagg
   assert.match(gap.detail, /no Muse equivalent/);
   assert.ok(
     report.gaps.some((g) => g.kind === "tool-names" && /Read->muse\.read_file/.test(g.detail)),
+  );
+  // The ruling is stated: mapped lists are carried requirements, not a
+  // claim about held tools (Muse children inherit the full session set).
+  assert.ok(
+    report.gaps.some(
+      (g) => g.kind === "tool-names" && /inherit the full session toolset/.test(g.detail),
+    ),
   );
   // Prose mentioning a tool is not an inventory entry and is left alone.
   const prose = convert(
