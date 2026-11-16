@@ -251,7 +251,72 @@ test("codex MCP mention rewrites to the project script when it exists", () => {
   });
   assert.doesNotMatch(routed.code, /mcp__github__add_issue_comment/);
   assert.match(routed.code, /bun scripts\/codex-review\.ts request/);
+  // No backticks are injected: prompts are often template literals, where a
+  // stray backtick would close the literal and break preflight parsing.
+  assert.doesNotMatch(routed.code, /`bun scripts/);
   assert.ok(routed.report.gaps.some((g) => g.kind === "codex-mcp" && /rewritten/.test(g.detail)));
+  // The account identity premise is disclosed as a gap, not baked in.
+  assert.ok(
+    routed.report.gaps.some(
+      (g) => g.kind === "codex-mcp" && /identity|authenticated/.test(g.detail),
+    ),
+  );
+});
+
+test("template-literal prompts survive the codex rewrite and still compile", async () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    "const r = await agent(`Post the mention with mcp__github__add_issue_comment for ${pr}.`, { label: 'x' });",
+    "return { r };",
+  ].join("\n");
+  const { code } = convert(src, {
+    inputName: "codex-tmpl.js",
+    codexReviewScript: "scripts/codex-review.ts",
+  });
+  const vm = await import("node:vm");
+  const wrapped =
+    "async function __muse_workflow(agent, parallel, phase, log, pipeline, args, budget) {\n" +
+    `${code}\n}`;
+  vm.compileFunction(wrapped, []);
+});
+
+test("model constants and model: literals are mapped in the text, not just at dispatch", () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const CITATION_AUDIT_MODEL = "sonnet";',
+    'const r = await agent("hi", { label: "x", model: "opus" });',
+    "return { r };",
+  ].join("\n");
+  const { code } = convert(src, { inputName: "models.js" });
+  assert.match(code, /const CITATION_AUDIT_MODEL = "muse-spark-1\.3";/);
+  assert.match(code, /model: "muse-wonder-1\.0"/);
+  assert.doesNotMatch(code, /= "sonnet"|model: "opus"/);
+});
+
+test("known Claude-only tool names drop from inventories; spread returns keep their shape", () => {
+  const src = [
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };',
+    'const AGENT_TOOLS = ["Read", "Artifact", "Monitor", "TaskStop"];',
+    'const r = await agent("hi", { label: "x" });',
+    "return { ...r, extra: 1 };",
+  ].join("\n");
+  const { code, report } = convert(src, { inputName: "tools3.js" });
+  assert.doesNotMatch(code, /"Artifact"|"Monitor"|"TaskStop"/);
+  assert.ok(report.gaps.some((g) => g.kind === "tool-names" && /Artifact/.test(g.detail)));
+  // A spread may already carry status: converter must not hardcode one.
+  assert.doesNotMatch(code, /status: "ok", \.\.\.r/);
+});
+
+test("trailing whitespace is trimmed outside template literals only", () => {
+  const src =
+    'export const meta = { name: "s", description: "d", whenToUse: "w", phases: [] };   \n' +
+    "const s = `keep me   \nnext`;\n" +
+    'const r = await agent("hi", { label: "x" });  \n' +
+    "return { r };\n";
+  const { code } = convert(src, { inputName: "ws.js" });
+  assert.doesNotMatch(code, /phases: \[\] \};   \n/);
+  assert.doesNotMatch(code, /label: "x" \}\);  \n/);
+  assert.match(code, /keep me   \nnext`/);
 });
 
 test("extended tool names map and terminal return gains status", () => {
