@@ -8,6 +8,7 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import vm from "node:vm";
 import {
   MUSE_AGENT_TYPES,
   SCHEMA_KEYWORDS_BAD,
@@ -21,6 +22,48 @@ import {
 } from "./convert.mjs";
 
 /** @typedef {import("./route.mjs").Dialect} Dialect */
+
+/**
+ * Parse-check a JS workflow the way the Muse runner does: wrapped as an
+ * async function body. Structural checks alone let unparseable converter
+ * output through as VALID (a stray backtick closing a template literal is
+ * invisible to regex checks), so a real compile is the only honest gate.
+ * `export` keywords are stripped for the parse attempt only (dialect rules
+ * judge them separately). Reports at most one E_SYNTAX into `errors`.
+ * @param {string} source
+ * @param {VerifyIssue[]} errors
+ */
+function parseCheck(source, errors) {
+  if (errors.some((e) => e.code === "E_WRAPPER")) return;
+  const masked = codeOnly(source);
+  let text = "";
+  let last = 0;
+  const re = /\bexport\s+/g;
+  let m;
+  while ((m = re.exec(source)) !== null) {
+    if (masked[m.index] === " ") continue;
+    text += source.slice(last, m.index);
+    last = m.index + m[0].length;
+  }
+  text += source.slice(last);
+  try {
+    vm.compileFunction(
+      `async function __wfport_parse(agent, parallel, phase, log, pipeline, args, budget) {\n${text}\n}`,
+      [],
+    );
+  } catch (err) {
+    const stack = err instanceof Error ? (err.stack ?? err.message) : String(err);
+    const lineHit = /(?:evalmachine|<anonymous>)[^:\n]*:(\d+)/.exec(stack);
+    const line = Math.max(1, (lineHit ? Number(lineHit[1]) : 2) - 1);
+    errors.push({
+      severity: "error",
+      code: "E_SYNTAX",
+      line,
+      message: `does not parse as a wrapped workflow body: ${err instanceof Error ? err.message : String(err)}`,
+      hint: "Fix the syntax so the runner preflight compiles the file (check template literals and injected text).",
+    });
+  }
+}
 
 /**
  * @typedef {object} VerifyIssue
@@ -432,6 +475,8 @@ export function verifyClaude(source, { agentsDir = null } = {}) {
     });
   }
 
+  parseCheck(source, errors);
+
   return {
     dialect: "claude",
     ok: errors.length === 0,
@@ -630,7 +675,8 @@ export function verifyMuse(source, { agentsDir = null } = {}) {
       severity: "warning",
       code: "W_MODEL_PIN",
       line: 1,
-      message: "model pins are dropped at runtime (the session route inherits)",
+      message:
+        "model pins are remapped at dispatch (Claude tiers to Muse models; unrecognized pins dropped)",
       hint: "Delete model: unless a wrapper re-applies it.",
     });
   }
@@ -743,6 +789,7 @@ export function verifyMuse(source, { agentsDir = null } = {}) {
   // The return requirement is validated above (with a shape check), so
   // skip it in the shared pass.
   checkShared(source, masked, sites, unclosed, errors, warnings, false);
+  parseCheck(source, errors);
 
   return {
     dialect: "muse",

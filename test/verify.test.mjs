@@ -178,6 +178,16 @@ return { status: "ok", ref: r, text: "done" };
   assert.ok(result.warnings.some((w) => w.code === "W_TOOL_NAMES"));
 });
 
+test("muse: syntax errors are parse errors, not valid", () => {
+  const src = `const broken = ;
+const r = await agent({ input: "hi", agentType: "general-purpose" });
+return { status: "ok", ref: r, text: "done" };
+`;
+  const result = verifyMuse(src);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((e) => e.code === "E_SYNTAX"));
+});
+
 test("muse: legacy wrapper fails the preflight check", () => {
   const src = `export default async function workflow(host) {
   const r = await host.agent({ input: "hi" });

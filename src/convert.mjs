@@ -1322,6 +1322,29 @@ function analyzeSchemas(source, strippedCode, gaps) {
   return schemas;
 }
 
+/**
+ * Known Claude built-in tools with no Muse equivalent. In a tool
+ * inventory they are dropped (with a gap): Muse children inherit the
+ * full toolset, so leaving Claude allowlist names in place misleads
+ * tool-gap reporting into comparing against names never held.
+ */
+export const CLAUDE_TOOLS_NO_MUSE = new Set([
+  "Artifact",
+  "Monitor",
+  "Task",
+  "TaskCreate",
+  "TaskGet",
+  "TaskList",
+  "TaskUpdate",
+  "TaskStop",
+  "TaskOutput",
+  "NotebookEdit",
+  "Skill",
+  "AskUserQuestion",
+  "EnterPlanMode",
+  "ExitPlanMode",
+]);
+
 /** Claude tool names with a Muse equivalent, for tool inventories. */
 export const CLAUDE_TO_MUSE_TOOL_NAMES = {
   Read: "read",
@@ -1366,7 +1389,8 @@ function mapToolInventories(code, gaps) {
   while ((m = re.exec(code)) !== null) {
     const name = m[1] ?? m[2] ?? "";
     const muse = /** @type {Record<string, string>} */ (CLAUDE_TO_MUSE_TOOL_NAMES)[name];
-    const isUnmappable = name === "ToolSearch" || name.startsWith("mcp__");
+    const isUnmappable =
+      name === "ToolSearch" || name.startsWith("mcp__") || CLAUDE_TOOLS_NO_MUSE.has(name);
     if (!muse && !isUnmappable) continue;
     let p = m.index - 1;
     while (p >= 0 && /\s/.test(code[p] ?? "")) p -= 1;
@@ -1559,6 +1583,136 @@ function stripExports(code, gaps) {
   return code;
 }
 
+/**
+ * Map Claude model pins in the text itself: `model: "<tier|claude-id>"`
+ * option literals and string constants whose name says MODEL
+ * (`const CITATION_AUDIT_MODEL = "sonnet"`). Runtime dispatch mapping alone
+ * leaves the Claude tier sitting in the Muse file, where a reader (or a
+ * later static check) sees a model the Muse catalogue does not have.
+ * @param {string} code
+ * @param {Gap[]} gaps
+ * @returns {string}
+ */
+function mapModelText(code, gaps) {
+  const masked = codeOnly(code);
+  /** @type {{ start: number, end: number, muse: string }[]} */
+  const edits = [];
+  const optRe = /\bmodel\s*:\s*(["'])([^"']+)\1/g;
+  let m;
+  while ((m = optRe.exec(code)) !== null) {
+    if (masked[m.index] === " ") continue;
+    const muse = museModelForClaude(m[2]);
+    if (!muse || muse === m[2]) continue;
+    const start = m.index + m[0].indexOf(m[1] ?? '"') + 1;
+    edits.push({ start, end: start + (m[2] ?? "").length, muse });
+  }
+  const constRe = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(["'])([^"']+)\2/g;
+  while ((m = constRe.exec(code)) !== null) {
+    if (masked[m.index] === " ") continue;
+    if (!/model/i.test(m[1] ?? "")) continue;
+    const muse = museModelForClaude(m[3]);
+    if (!muse || muse === m[3]) continue;
+    const start = m.index + m[0].indexOf(m[2] ?? '"', m[0].indexOf("=")) + 1;
+    edits.push({ start, end: start + (m[3] ?? "").length, muse });
+  }
+  edits.sort((a, b) => b.start - a.start);
+  for (const e of edits) code = code.slice(0, e.start) + e.muse + code.slice(e.end);
+  if (edits.length) {
+    gaps.push({
+      kind: "model",
+      line: 1,
+      detail: `${edits.length} model pin(s) rewritten in the text to Muse models (opus->muse-wonder-1.0, sonnet->muse-spark-1.3, haiku->muse-ember-1.0)`,
+    });
+  }
+  return code;
+}
+
+/**
+ * Trim trailing spaces/tabs at line ends outside template literals
+ * (template contents are string data and keep theirs). Converter output
+ * should not trip the target project's formatter over whitespace it
+ * carried in from the source.
+ * @param {string} code
+ * @returns {string}
+ */
+function trimTrailingWhitespace(code) {
+  const out = code.split("");
+  let state = "code"; // code | sq | dq | tmpl | line | block
+  const tmplStack = [];
+  let depth = 0;
+  let i = 0;
+  /** @param {number} at */
+  const trimAt = (at) => {
+    let j = at - 1;
+    while (j >= 0 && (out[j] === " " || out[j] === "\t")) {
+      out[j] = "";
+      j -= 1;
+    }
+  };
+  while (i < code.length) {
+    const c = code[i];
+    const n = code[i + 1] ?? "";
+    if (c === "\n") {
+      if (state !== "tmpl") trimAt(i);
+      if (state === "line" || state === "sq" || state === "dq") state = "code";
+      i += 1;
+      continue;
+    }
+    if (state === "line") {
+      i += 1;
+      continue;
+    }
+    if (state === "block") {
+      if (c === "*" && n === "/") state = "code";
+      i += 1;
+      continue;
+    }
+    if (state === "sq" || state === "dq") {
+      const q = state === "sq" ? "'" : '"';
+      if (c === "\\") i += 1;
+      else if (c === q) state = "code";
+      i += 1;
+      continue;
+    }
+    if (state === "tmpl") {
+      if (c === "\\") i += 1;
+      else if (c === "`") state = "code";
+      else if (c === "$" && n === "{") {
+        tmplStack.push(depth);
+        state = "code";
+        depth += 1;
+        i += 1;
+      }
+      i += 1;
+      continue;
+    }
+    if (c === "/" && n === "/") {
+      state = "line";
+      i += 2;
+      continue;
+    }
+    if (c === "/" && n === "*") {
+      state = "block";
+      i += 2;
+      continue;
+    }
+    if (c === "'") state = "sq";
+    else if (c === '"') state = "dq";
+    else if (c === "`") state = "tmpl";
+    else if (c === "{" || c === "[" || c === "(") depth += 1;
+    else if (c === "}" || c === "]" || c === ")") {
+      depth -= 1;
+      if (c === "}" && tmplStack.length && depth === tmplStack[tmplStack.length - 1]) {
+        tmplStack.pop();
+        state = "tmpl";
+      }
+    }
+    i += 1;
+  }
+  if (state !== "tmpl") trimAt(code.length);
+  return out.join("");
+}
+
 // Convert Claude Workflow source to Muse Workflow source + gap report.
 /**
  * @param {string} source
@@ -1603,7 +1757,7 @@ export function convert(
           ? line
           : line.replaceAll(
               "mcp__github__add_issue_comment",
-              `\`bun ${codexReviewScript} request <pr>\``,
+              `bun ${codexReviewScript} request <pr>`,
             ),
       )
       .join("\n");
@@ -1642,6 +1796,9 @@ export function convert(
 
   // Tool inventories (AGENT_TOOLS-style name lists) become Muse tool names.
   code = mapToolInventories(code, gaps);
+
+  // Model pins also map in the text (constants and option literals).
+  code = mapModelText(code, gaps);
 
   // Custom agentTypes: every literal anywhere in code plus dynamic
   // expressions. The injected museDispatchArgs choke point maps them at
@@ -1758,7 +1915,7 @@ export function convert(
     gaps.push({
       kind: "codex-mcp",
       line: 1,
-      detail: `codex review round rewritten: prompts ordering mcp__github__add_issue_comment now route through \`bun ${codexReviewScript} request <pr>\` — verify the script posts as an account that can draw a review and that collection reads its report before relying on the round`,
+      detail: `codex review round rewritten: prompts ordering mcp__github__add_issue_comment now route through bun ${codexReviewScript} request — but account identity is a premise, not a converted fact: the MCP path posts as the connector account (e.g. claude[bot]) while the script posts as the locally authenticated gh account, and wfport has only swapped the tool token, not converted an MCP-first flow to script-only. Decide which authenticated identity this project wants, confirm it can draw a review, and rewrite the flow to match before relying on the round`,
     });
   }
 
@@ -1841,8 +1998,18 @@ export function convert(
     const retMatch = /^return\s*\{/m.exec(retMasked);
     if (retMatch) {
       const openIdx = code.indexOf("{", retMatch.index);
+      const closeIdx = matchDelim(code, openIdx, "{", "}");
+      const inner = closeIdx > 0 ? code.slice(openIdx + 1, closeIdx) : "";
+      const hasSpread = splitTopLevel(inner).some((p) => p.trimStart().startsWith("..."));
       const keys = parseSchemaEntries(code, openIdx).map((e) => e.key);
-      if (!keys.includes("status")) {
+      if (hasSpread) {
+        gaps.push({
+          kind: "return",
+          line: lineOf(code, retMatch.index),
+          detail:
+            "terminal return spreads a value that may already carry status — no hardcoded status inserted; confirm the Muse terminal shape by hand",
+        });
+      } else if (!keys.includes("status")) {
         code = `${code.slice(0, openIdx + 1)} status: "ok",${code.slice(openIdx + 1)}`;
         gaps.push({
           kind: "return",
@@ -1872,7 +2039,9 @@ export function convert(
   headerLines.push("");
   const header = headerLines.join("\n");
   const helpers = museHelpers(customTypes, agentFiles, modelForType);
-  const wrapped = `${header}${preserveBlock(strippedSchemas.preserved)}${helpers}\n${code.trimEnd()}\n`;
+  const wrapped = trimTrailingWhitespace(
+    `${header}${preserveBlock(strippedSchemas.preserved)}${helpers}\n${code.trimEnd()}\n`,
+  );
 
   const report = {
     input: inputName,
