@@ -134,6 +134,9 @@ test("--help documents the flag set, defaults, and exit codes", () => {
   assert.match(r.stdout, /stdout/);
   assert.match(r.stdout, /stderr/);
   assert.match(r.stdout, /Exit codes: 0.*1.*2/);
+  assert.match(r.stdout, /wfport:codex-route/);
+  assert.match(r.stdout, /script-only/);
+  assert.match(r.stdout, /mcp-first/);
 });
 
 test("--version prints the version", () => {
