@@ -52,6 +52,16 @@ Examples:
   wfport verify flow.js --format agent                  # compact check for agents
   wfport verify flow.rhai                               # human-readable check
 
+Project directives (comments in the Claude source):
+  // wfport:codex-route script-only
+  // wfport:codex-route mcp-first
+    Declare how the Codex mention round posts when converting Claude -> Muse.
+    script-only rewrites MCP mention orders to the project's
+    scripts/codex-review.ts route; mcp-first keeps the MCP-first text.
+    Without a directive no route is assumed: the converter emits a
+    codex-mcp gap naming both variants, because the posting identity
+    depends on the session's authenticated gh account.
+
 Exit codes: 0 clean (or valid for verify), 1 usage or config error, 2 gaps/errors need review.
 Without --out the converted source goes to stdout; without --report the
 gap report JSON goes to stderr.`;

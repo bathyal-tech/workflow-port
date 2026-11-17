@@ -269,6 +269,12 @@ test("codex MCP mention stays a gap even when the project script exists", () => 
       (g) => g.kind === "codex-mcp" && /Variant A/.test(g.detail) && /Variant B/.test(g.detail),
     ),
   );
+  // And the override syntax itself is stated in the gap, not just in docs.
+  assert.ok(
+    routed.report.gaps.some(
+      (g) => g.kind === "codex-mcp" && /wfport:codex-route script-only/.test(g.detail),
+    ),
+  );
 });
 
 test("template-literal prompts survive conversion and still compile", async () => {
@@ -567,15 +573,15 @@ test("every agent-file tool cap is a named gap, not only the reviewer's", () => 
   );
 });
 
-test("museClassifyStatus only treats missing or failed outcomes as needs-fix", () => {
+test("museClassifyStatus only treats failed outcomes as needs-fix", () => {
   const museClassifyStatus = new Function(`${museHelpers([])}\n; return museClassifyStatus;`)();
   // Healthy: falsy primitives (0, false, "") and skipped strings are fine.
   assert.equal(
     museClassifyStatus([{ status: "ok" }, [{ status: "ok" }], "skipped", 0, false, ""]),
     "ok",
   );
-  assert.equal(museClassifyStatus([null]), "needs-fix");
-  assert.equal(museClassifyStatus([undefined]), "needs-fix");
+  // Legitimately null optional legs (sweepStop, reflect) are not failures.
+  assert.equal(museClassifyStatus([null, undefined, { status: "ok" }]), "ok");
   assert.equal(museClassifyStatus([[{ status: "needs-fix" }]]), "needs-fix");
   assert.equal(museClassifyStatus([{ status: "abort" }]), "needs-fix");
 });

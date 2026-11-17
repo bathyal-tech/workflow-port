@@ -170,6 +170,14 @@ option objects; `Date.now` / `Math.random`; fan-out beyond ~15 children; missing
 terminal `return { status, ref, text }`. The `--agents-dir` option (default:
 sibling `../agents`) checks whether each custom type's agent file exists.
 
+A project can declare how its Codex mention round posts by adding a comment
+to the Claude source: `// wfport:codex-route script-only` rewrites MCP
+mention orders to the project's `scripts/codex-review.ts` route on the
+Claude → Muse leg, while `// wfport:codex-route mcp-first` keeps the
+MCP-first text. With no directive, wfport assumes neither identity (the
+posting account depends on the session's authenticated `gh`) and emits a
+`codex-mcp` gap naming both variants and this syntax.
+
 ## Design note: one canonical language?
 
 Grok has a third workflow dialect, so should there be one canonical definition

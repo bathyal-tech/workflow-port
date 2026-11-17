@@ -345,12 +345,13 @@ export function museHelpers(
     "  return out;",
     "};",
     "// museClassifyStatus derives the Muse terminal status from the values",
-    "// being returned: needs-fix when any is missing (museResult maps errors",
-    "// to null) or reports needs-fix/abort/error/failed, else ok. Arrays and",
-    "// top-level result objects are inspected one level deep.",
+    "// being returned: needs-fix only when a returned outcome reports",
+    "// needs-fix/abort/error/failed, else ok. Null/undefined optional",
+    "// outcomes and falsy primitives are ignored. Arrays and top-level",
+    "// result objects are inspected one level deep.",
     "const museClassifyStatus = (values) => {",
     "  const bad = (v) => {",
-    "    if (v === null || v === undefined) return true;",
+    "    if (v === null || v === undefined) return false;",
     "    if (Array.isArray(v)) return v.some(bad);",
     '    if (typeof v === "object")',
     '      return v.status === "needs-fix" || v.status === "abort" || v.status === "error" || v.status === "failed";',
@@ -2075,7 +2076,7 @@ export function convert(
     gaps.push({
       kind: "codex-mcp",
       line: 1,
-      detail: `codex review round is a gap, not a converted strategy: this project carries ${codexReviewScript} as one candidate route, but neither the source nor wfport can know the session's authenticated gh identity — the MCP path posts as the connector account (e.g. claude[bot]) while the script posts as whoever gh is authenticated as, and an MCP-first two-call flow premised on one identity silently becomes wrong under the other. No prompt was rewritten. Candidate variants: Variant A (MCP-first) keeps the source prompt text and posts as the connector account; Variant B (script-only) replaces the mention order with bun ${codexReviewScript} request <pr> and drops the MCP flow, posting as the authenticated gh account. Decide which identity this session actually has and apply one variant before running`,
+      detail: `codex review round is a gap, not a converted strategy: this project carries ${codexReviewScript} as one candidate route, but neither the source nor wfport can know the session's authenticated gh identity — the MCP path posts as the connector account (e.g. claude[bot]) while the script posts as whoever gh is authenticated as, and an MCP-first two-call flow premised on one identity silently becomes wrong under the other. No prompt was rewritten. Candidate variants: Variant A (MCP-first) keeps the source prompt text and posts as the connector account; Variant B (script-only) replaces the mention order with bun ${codexReviewScript} request <pr> and drops the MCP flow, posting as the authenticated gh account. Decide which identity this session actually has and apply one variant before running. To declare the choice in the Claude source, add a comment line: // wfport:codex-route script-only (for Variant B) or // wfport:codex-route mcp-first (for Variant A); with a declared script-only directive, wfport performs the rewrite for you`,
     });
   }
 
@@ -2095,7 +2096,7 @@ export function convert(
       kind: "codex-mcp",
       line: 1,
       detail:
-        "codex review round: the @codex mention rides the GitHub MCP write path (e.g. mcp__github__add_issue_comment), which Muse children lack, and the scripts/codex-review.ts fallback posts outside the child — it may post as the wrong account and come back not reviewable, so the round is dropped from collection. Document an explicit skip or wire a Muse-side posting + collection route before running; do not assume the third-party review happens.",
+        "codex review round: the @codex mention rides the GitHub MCP write path (e.g. mcp__github__add_issue_comment), which Muse children lack, and the scripts/codex-review.ts fallback posts outside the child — it may post as the wrong account and come back not reviewable, so the round is dropped from collection. Document an explicit skip or wire a Muse-side posting + collection route before running; do not assume the third-party review happens. To declare the route in the Claude source, add a comment line: // wfport:codex-route script-only or // wfport:codex-route mcp-first.",
     });
   }
 
@@ -2181,7 +2182,7 @@ export function convert(
           kind: "return",
           line: lineOf(code, retMatch.index),
           detail:
-            "terminal return gained status: museClassifyStatus([...returned values]) — needs-fix when any value is missing or reports needs-fix/abort/error/failed; confirm that classification matches the run's real outcomes",
+            "terminal return gained status: museClassifyStatus([...returned values]) — needs-fix only when a returned outcome reports needs-fix/abort/error/failed (legitimate null optional outcomes are ignored); confirm that classification matches the run's real outcomes",
         });
       }
     }
