@@ -16,7 +16,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
@@ -62,7 +62,7 @@ jobs:
           git tag -a "v$VERSION" -m "workflow-port v$VERSION"
           git push origin "refs/tags/v$VERSION"
       - run: bun run build:all
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/wfport-*
       - run: gh release create "v$VERSION" --notes-file RELEASE_NOTES.md dist/wfport-*
